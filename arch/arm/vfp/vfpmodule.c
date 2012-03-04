@@ -401,7 +401,7 @@ int vfp_flush_context(void)
 		vfp_save_state(last_VFP_context[cpu], fpexc);
 
 		/* disable, just in case */
-		fmxr(FPEXC, fmrx(FPEXC) & ~FPEXC_EN);
+		fmxr(FPEXC, fpexc & ~FPEXC_EN);
 		saved = 1;
 	}
 	last_VFP_context[cpu] = NULL;
