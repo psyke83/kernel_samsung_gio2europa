@@ -53,13 +53,18 @@ int pc_clk_reset(unsigned id, enum clk_reset_action action)
 		return (int)id < 0 ? -EINVAL : 0;
 }
 
+#include <linux/kernel.h>
 int pc_clk_set_rate(unsigned id, unsigned rate)
 {
 	/* The rate _might_ be rounded off to the nearest KHz value by the
 	 * remote function. So a return value of 0 doesn't necessarily mean
 	 * that the exact rate was set successfully.
 	 */
-	int rc = msm_proc_comm(PCOM_CLKCTL_RPC_SET_RATE, &id, &rate);
+	int rc;
+	printk("%s id : %d, rate : %d\n", __FUNCTION__, id, rate);
+	rc = msm_proc_comm(PCOM_CLKCTL_RPC_SET_RATE, &id, &rate);
+
+	printk("%s id : %d, rate : %d\n, rc : %d\n", __FUNCTION__, id, rate, rc);
 	if (rc < 0)
 		return rc;
 	else

@@ -101,6 +101,8 @@ extern int mdp_lcd_rd_cnt_offset_fast;
 extern int mdp_usec_diff_threshold;
 
 #ifdef CONFIG_FB_MSM_LCDC
+extern int mdp_lcdc_pclk_clk_rate;
+extern int mdp_lcdc_pad_pclk_clk_rate;
 extern int first_pixel_start_x;
 extern int first_pixel_start_y;
 #endif
@@ -236,8 +238,6 @@ static int mdp_do_histogram(struct fb_info *info, struct mdp_histogram *hist)
 	mdp_hist.g = (hist->g) ? mdp_hist_g : 0;
 	mdp_hist.b = (hist->b) ? mdp_hist_b : 0;
 
-	mdp_enable_irq(MDP_HISTOGRAM_TERM);
-
 #ifdef CONFIG_FB_MSM_MDP40
 	MDP_OUTP(MDP_BASE + 0x95004, hist->frame_cnt);
 	MDP_OUTP(MDP_BASE + 0x95000, 1);
@@ -246,10 +246,6 @@ static int mdp_do_histogram(struct fb_info *info, struct mdp_histogram *hist)
 	MDP_OUTP(MDP_BASE + 0x94000, 1);
 #endif
 	wait_for_completion_killable(&mdp_hist_comp);
-
-	/* disable the irq for histogram since we handled it
-	   when the control reaches here */
-	mdp_disable_irq(MDP_HISTOGRAM_TERM);
 
 	if (hist->r) {
 		ret = copy_to_user(hist->r, mdp_hist.r, hist->bin_cnt*4);
@@ -435,6 +431,9 @@ static void mdp_pipe_ctrl_workqueue_handler(struct work_struct *work)
 {
 	mdp_pipe_ctrl(MDP_MASTER_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
 }
+
+extern int enter_suspend;	//hsil
+
 void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 		   boolean isr)
 {
@@ -460,6 +459,8 @@ void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 	} else {
 		atomic_dec(&mdp_block_power_cnt[block]);
 
+//		if (enter_suspend)
+//		printk("[HSIL] %s(%d)  atomic_read : %d\n", __func__, __LINE__, atomic_read(&mdp_block_power_cnt[block]));
 		if (atomic_read(&mdp_block_power_cnt[block]) < 0) {
 			/*
 			* Master has to serve a request to power off MDP always
@@ -488,11 +489,19 @@ void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 	if (isr) {
 		/* checking all blocks power state */
 		for (i = 0; i < MDP_MAX_BLOCK; i++) {
+//			if (enter_suspend)
+//			printk("[HSIL] %s(%d)  atomic_read : %d\n", __func__, __LINE__, atomic_read(&mdp_block_power_cnt[i]));
 			if (atomic_read(&mdp_block_power_cnt[i]) > 0)
+			{
+//				if (enter_suspend)
+//					printk("[HSIL] %s(%d) : the mdp block #%d is alive\n", __func__, __LINE__, i);
 				mdp_all_blocks_off = FALSE;
+			}
 		}
 
 		if ((mdp_all_blocks_off) && (mdp_current_clk_on)) {
+//			if (enter_suspend)
+//				printk("[HSIL] %s(%d) : mdp_all_blocks_off\n", __func__, __LINE__);
 			/* send workqueue to turn off mdp power */
 			queue_delayed_work(mdp_pipe_ctrl_wq,
 					   &mdp_pipe_ctrl_worker,
@@ -502,10 +511,28 @@ void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 		down(&mdp_pipe_ctrl_mutex);
 		/* checking all blocks power state */
 		for (i = 0; i < MDP_MAX_BLOCK; i++) {
+//			if (enter_suspend)
+//			printk("[HSIL] %s(%d)  atomic_read : %d\n", __func__, __LINE__, atomic_read(&mdp_block_power_cnt[i]));
 			if (atomic_read(&mdp_block_power_cnt[i]) > 0)
+			{
+//				if (enter_suspend)
+//					printk("[HSIL] %s(%d) : the mdp block #%d is alive\n", __func__, __LINE__, i);
 				mdp_all_blocks_off = FALSE;
+			}	
 		}
-
+		/* When suspend mode, wait for turn-off mdp block */
+		// hsil
+		if( (mdp_all_blocks_off == FALSE) && (block == MDP_MASTER_BLOCK) && (state == MDP_BLOCK_POWER_OFF) && (isr == FALSE) )
+		{
+			printk("[HSIL] wait for MDP_DMA2_BLOCK off\n");
+			while (atomic_read(&mdp_block_power_cnt[MDP_DMA2_BLOCK]) > 0)
+			{
+				cpu_relax();
+				atomic_dec(&mdp_block_power_cnt[MDP_DMA2_BLOCK]);
+			}
+			printk("[HSIL] Now MDP_DMA2_BLOCK off\n");
+			mdp_all_blocks_off = TRUE;
+		}
 		/*
 		 * find out whether a delayable work item is currently
 		 * pending
@@ -524,12 +551,14 @@ void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 		}
 
 		if ((mdp_all_blocks_off) && (mdp_current_clk_on)) {
+//			if (enter_suspend)
+//				printk("[HSIL] %s(%d) : mdp_all_blocks_off\n", __func__, __LINE__);
 			if (block == MDP_MASTER_BLOCK) {
 				mdp_current_clk_on = FALSE;
 				/* turn off MDP clks */
 				if (mdp_clk != NULL) {
 					clk_disable(mdp_clk);
-					MSM_FB_DEBUG("MDP CLK OFF\n");
+					printk("MDP CLK OFF\n");
 				}
 				if (mdp_pclk != NULL) {
 					clk_disable(mdp_pclk);
@@ -546,7 +575,7 @@ void mdp_pipe_ctrl(MDP_BLOCK_TYPE block, MDP_BLOCK_POWER_STATE state,
 			/* turn on MDP clks */
 			if (mdp_clk != NULL) {
 				clk_enable(mdp_clk);
-				MSM_FB_DEBUG("MDP CLK ON\n");
+				printk("MDP CLK ON\n");
 			}
 			if (mdp_pclk != NULL) {
 				clk_enable(mdp_pclk);
@@ -609,11 +638,6 @@ irqreturn_t mdp_isr(int irq, void *ptr)
 		/* LCDC UnderFlow */
 		if (mdp_interrupt & LCDC_UNDERFLOW) {
 			mdp_lcdc_underflow_cnt++;
-			/*when underflow happens HW resets all the histogram
-			 registers that were set before so restore them back
-			 to normal.*/
-			MDP_OUTP(MDP_BASE + 0x94010, 1);
-			MDP_OUTP(MDP_BASE + 0x9401c, 2);
 		}
 		/* LCDC Frame Start */
 		if (mdp_interrupt & LCDC_FRAME_START) {
@@ -772,6 +796,12 @@ static void mdp_drv_init(void)
 				msm_fb_debugfs_file_create(mdp_dir,
 					"lcdc_start_y",
 					(u32 *) &first_pixel_start_y);
+                msm_fb_debugfs_file_create(mdp_dir,
+					"mdp_lcdc_pclk_clk_rate",
+					(u32 *) &mdp_lcdc_pclk_clk_rate);
+				msm_fb_debugfs_file_create(mdp_dir,
+					"mdp_lcdc_pad_pclk_clk_rate",
+					(u32 *) &mdp_lcdc_pad_pclk_clk_rate);
 #endif
 			}
 		}
@@ -1090,17 +1120,22 @@ static int mdp_probe(struct platform_device *pdev)
 static void mdp_suspend_sub(void)
 {
 	/* cancel pipe ctrl worker */
+	printk("[HSIL] %s(%d) will cancel_delayed_work\n", __func__, __LINE__);
 	cancel_delayed_work(&mdp_pipe_ctrl_worker);
 
 	/* for workder can't be cancelled... */
+	printk("[HSIL] %s(%d) will flush_workqueue\n", __func__, __LINE__);
 	flush_workqueue(mdp_pipe_ctrl_wq);
 
 	/* let's wait for PPP completion */
+	printk("[HSIL] %s(%d) will atomic_read\n", __func__, __LINE__);
 	while (atomic_read(&mdp_block_power_cnt[MDP_PPP_BLOCK]) > 0)
 		cpu_relax();
 
 	/* try to power down */
+	printk("[HSIL] %s(%d) will mdp_pipe_ctrl\n", __func__, __LINE__);
 	mdp_pipe_ctrl(MDP_MASTER_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
+	printk("[HSIL] %s(%d) after mdp_pipe_ctrl\n", __func__, __LINE__);
 }
 #endif
 

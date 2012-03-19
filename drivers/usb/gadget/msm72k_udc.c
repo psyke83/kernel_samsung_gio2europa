@@ -55,6 +55,7 @@ static const char driver_name[] = "msm72k_udc";
 
 #define	DRIVER_DESC		"MSM 72K USB Peripheral Controller"
 #define	DRIVER_NAME		"MSM72K_UDC"
+#define	DRIVER_NAME_VBUS		"MSM72K_UDC_VBUS"
 
 #define EPT_FLAG_IN        0x0001
 
@@ -156,6 +157,8 @@ struct usb_info {
 	unsigned flags;
 
 	atomic_t configured;
+	atomic_t vbus_draw;
+	atomic_t online_event;
 	atomic_t running;
 
 	struct dma_pool *pool;
@@ -192,6 +195,7 @@ struct usb_info {
 	struct usb_gadget		gadget;
 	struct usb_gadget_driver	*driver;
 	struct switch_dev sdev;
+	struct switch_dev sdev_vbus;
 
 #define ep0out ept[0]
 #define ep0in  ept[16]
@@ -251,6 +255,19 @@ static ssize_t print_switch_state(struct switch_dev *sdev, char *buf)
 
 	return sprintf(buf, "%s\n",
 			(atomic_read(&ui->configured) ? "online" : "offline"));
+}
+
+static ssize_t print_switch_name_vbus(struct switch_dev *sdev, char *buf)
+{
+	return sprintf(buf, "%s\n", DRIVER_NAME_VBUS);
+}
+
+static ssize_t print_switch_state_vbus(struct switch_dev *sdev, char *buf)
+{
+	struct usb_info *ui = the_usb_info;
+
+	return sprintf(buf, "%s\n",
+			(atomic_read(&ui->vbus_draw) ? "online" : "offline"));
 }
 
 static inline enum chg_type usb_get_chg_type(struct usb_info *ui)
@@ -938,7 +955,10 @@ static void handle_endpoint(struct usb_info *ui, unsigned bit)
 		req->busy = 0;
 		req->live = 0;
 		if (req->dead)
+		{
 			do_free_req(ui, req);
+			break;
+		}
 
 		if (req->req.complete) {
 			spin_unlock_irqrestore(&ui->lock, flags);
@@ -994,7 +1014,10 @@ static void flush_endpoint_sw(struct msm_endpoint *ept)
 			spin_lock_irqsave(&ui->lock, flags);
 		}
 		if (req->dead)
+		{
 			do_free_req(ui, req);
+			break;
+		}
 		req = req->next;
 	}
 	spin_unlock_irqrestore(&ui->lock, flags);
@@ -1100,8 +1123,8 @@ static irqreturn_t usb_interrupt(int irq, void *data)
 		ui->usb_state = USB_STATE_SUSPENDED;
 		ui->flags = USB_FLAG_SUSPEND;
 		spin_unlock_irqrestore(&ui->lock, flags);
-
-		ui->driver->suspend(&ui->gadget);
+		if (ui->driver)
+		        ui->driver->suspend(&ui->gadget);
 		schedule_work(&ui->work);
 	}
 
@@ -1368,6 +1391,9 @@ static void usb_do_work(struct work_struct *w)
 					ui->driver->disconnect(&ui->gadget);
 				}
 
+				atomic_set(&ui->vbus_draw, 0);
+				atomic_set(&ui->online_event, 0);
+				switch_set_state(&ui->sdev_vbus, 0);
 				switch_set_state(&ui->sdev, 0);
 				/* power down phy, clock down usb */
 				otg->reset(ui->xceiv);
@@ -1403,6 +1429,9 @@ static void usb_do_work(struct work_struct *w)
 				 * is selected. Send online/offline event
 				 * accordingly.
 				 */
+				if(atomic_read(&ui->online_event))
+					switch_set_state(&ui->sdev_vbus, 1);
+				atomic_set(&ui->online_event, 0);
 				switch_set_state(&ui->sdev,
 						atomic_read(&ui->configured));
 
@@ -1459,6 +1488,8 @@ static void usb_do_work(struct work_struct *w)
 				schedule_delayed_work(
 						&ui->chg_det,
 						USB_CHG_DET_DELAY);
+				atomic_set(&ui->vbus_draw, 1);
+				atomic_set(&ui->online_event, 1);
 			}
 			break;
 		}
@@ -1475,8 +1506,9 @@ void msm_hsusb_set_vbus_state(int online)
 	struct usb_info *ui = the_usb_info;
 
 	if (!ui) {
-		dev_err(&ui->pdev->dev, "msm_hsusb_set_vbus_state called"
-			" before driver initialized\n");
+//		dev_err(&ui->pdev->dev, "msm_hsusb_set_vbus_state called"
+//			" before driver initialized\n");
+		printk("%s :msm_hsusb_set_vbus_state called before driver initialized\n",__func__);
 		return;
 	}
 
@@ -2149,6 +2181,14 @@ static int msm72k_probe(struct platform_device *pdev)
 	if (retval)
 		return usb_free(ui, retval);
 
+	ui->sdev_vbus.name = DRIVER_NAME_VBUS;
+	ui->sdev_vbus.print_name = print_switch_name_vbus;
+	ui->sdev_vbus.print_state = print_switch_state_vbus;
+
+	retval = switch_dev_register(&ui->sdev_vbus);
+	if (retval)
+		return usb_free(ui, retval);
+
 	the_usb_info = ui;
 
 	wake_lock_init(&ui->wlock,
@@ -2168,6 +2208,7 @@ static int msm72k_probe(struct platform_device *pdev)
 			"%s: Cannot bind the transceiver, retval:(%d)\n",
 			__func__, retval);
 		switch_dev_unregister(&ui->sdev);
+		switch_dev_unregister(&ui->sdev_vbus);
 		wake_lock_destroy(&ui->wlock);
 		return usb_free(ui, retval);
 	}

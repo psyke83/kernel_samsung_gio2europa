@@ -46,10 +46,13 @@
 #include <linux/stat.h>
 #include <linux/device.h>
 #include <linux/wakelock.h>
+#include <linux/nmi.h>
+#include <linux/console.h>
 
 #include <asm/atomic.h>
 #include <asm/irq.h>
 #include <asm/system.h>
+#include <asm/delay.h>
 
 #include <mach/hardware.h>
 #include <mach/dma.h>
@@ -167,6 +170,11 @@ static struct uart_ops msm_hs_ops;
 
 #define UARTDM_TO_MSM(uart_port) \
 	container_of((uart_port), struct msm_hs_port, uport)
+
+struct uart_port *msm_hs_get_port_from_line(unsigned int line)
+{
+	return &q_uart_port[line].uport;
+}
 
 static ssize_t show_clock(struct device *dev, struct device_attribute *attr,
 			  char *buf)
@@ -289,6 +297,17 @@ static int __devexit msm_hs_remove(struct platform_device *pdev)
 
 	return 0;
 }
+
+#ifdef CONFIG_HS_SERIAL_MSM_CONSOLE
+static void msm_hs_reset(struct uart_port *uport)
+{
+	msm_hs_write(uport, UARTDM_CR_ADDR, RESET_RX);
+	msm_hs_write(uport, UARTDM_CR_ADDR, RESET_TX);
+	msm_hs_write(uport, UARTDM_CR_ADDR, RESET_ERROR_STATUS);
+	msm_hs_write(uport, UARTDM_CR_ADDR, RESET_BREAK_INT);
+	msm_hs_write(uport, UARTDM_CR_ADDR, RESET_CTS);
+}
+#endif
 
 static int msm_hs_init_clk(struct uart_port *uport)
 {
@@ -1349,8 +1368,7 @@ static int msm_hs_startup(struct uart_port *uport)
 
 	tx->xfer.complete_func = msm_hs_dmov_tx_callback;
 
-	tx->xfer.crci_mask = msm_dmov_build_crci_mask(1,
-						      msm_uport->dma_tx_crci);
+	tx->xfer.crci_mask = msm_dmov_build_crci_mask(msm_uport->dma_tx_crci);
 
 	tx->command_ptr->cmd = CMD_LC |
 	    CMD_DST_CRCI(msm_uport->dma_tx_crci) | CMD_MODE_BOX;
@@ -1456,8 +1474,7 @@ static int uartdm_init_port(struct uart_port *uport)
 
 	rx->xfer.complete_func = msm_hs_dmov_rx_callback;
 
-	rx->xfer.crci_mask = msm_dmov_build_crci_mask(1,
-						      msm_uport->dma_rx_crci);
+	rx->xfer.crci_mask = msm_dmov_build_crci_mask(msm_uport->dma_rx_crci);
 
 	rx->command_ptr->cmd = CMD_LC |
 	    CMD_SRC_CRCI(msm_uport->dma_rx_crci) | CMD_MODE_BOX;
@@ -1480,6 +1497,139 @@ static int uartdm_init_port(struct uart_port *uport)
 
 	return 0;
 }
+
+#ifdef CONFIG_HS_SERIAL_MSM_CONSOLE
+static inline struct uart_port * get_port_from_line(unsigned int line)
+{
+	return &q_uart_port[line].uport;
+}
+
+/*
+ *  Wait for transmitter & holding register to empty
+ *  Derived from wait_for_xmitr in 8250 serial driver by Russell King
+ */
+static inline void wait_for_xmitr(struct uart_port *port, int bits)
+{
+	unsigned int status, mr, tmout = 10000;
+
+	/* Wait up to 10ms for the character(s) to be sent. */
+	do {
+		status = msm_hs_read(port, UARTDM_SR_ADDR);
+
+		if (--tmout == 0)
+			break;
+		udelay(1);
+	} while ((status & bits) != bits);
+
+	mr = msm_hs_read(port, UARTDM_MR1_ADDR);
+
+	/* Wait up to 1s for flow control if necessary */
+	if (mr & UARTDM_MR1_CTS_CTL_BMSK) {
+		unsigned int tmout;
+		for (tmout = 1000000; tmout; tmout--) {
+			unsigned int isr = msm_hs_read(port, UARTDM_ISR_ADDR);
+
+			/* CTS input is active lo */
+			if (!(isr & UARTDM_ISR_CURRENT_CTS_BMSK))
+				break;
+			udelay(1);
+			touch_nmi_watchdog();
+		}
+	}
+}
+
+
+static void msm_hs_console_putchar(struct uart_port *port, int c)
+{
+	/* This call can incur significant delay if CTS flowcontrol is enabled
+	 * on port and no serial cable is attached.
+	 */
+	wait_for_xmitr(port, UARTDM_SR_TXRDY_BMSK);
+
+	msm_hs_write(port, UARTDM_TF_ADDR, c);
+}
+
+static void msm_hs_console_write(struct console *co, const char *s,
+			      unsigned int count)
+{
+	struct uart_port *uport;
+	struct msm_hs_port *msm_uport;
+	int locked;
+
+	BUG_ON(co->index < 0 || co->index >= UARTDM_NR); 
+
+	uport = get_port_from_line(co->index);
+	msm_uport = UARTDM_TO_MSM(uport);
+
+	/* not pretty, but we can end up here via various convoluted paths */
+	if (uport->sysrq || oops_in_progress)
+		locked = spin_trylock(&uport->lock);
+	else {
+		locked = 1;
+		spin_lock(&uport->lock);
+	}
+
+	clk_enable(msm_uport->clk);
+	uart_console_write(uport, s, count, msm_hs_console_putchar);
+	clk_disable(msm_uport->clk);
+
+	if (locked)
+		spin_unlock(&uport->lock);
+}
+
+static int __init msm_hs_console_setup(struct console *co, char *options)
+{
+	struct uart_port *uport;
+	int baud, flow, bits, parity;
+
+	if (unlikely(co->index >= UARTDM_NR || co->index < 0))
+		return -ENXIO;
+
+	uport = get_port_from_line(co->index);
+
+	if (unlikely(!uport->membase))
+		return -ENXIO;
+
+	uport->cons = co;
+
+	msm_hs_init_clk(uport);
+
+	if (options)
+		uart_parse_options(options, &baud, &parity, &bits, &flow);
+
+	bits = 8;
+	parity = 'n';
+	flow = 'n';
+
+	msm_hs_write(uport, UARTDM_MR2_ADDR, 
+		UARTDM_MR2_BITS_PER_CHAR_BMSK | UARTDM_MR2_STOP_BIT_LEN_BMSK);	/* 8N1 */
+
+	if (baud < 300 || baud > 115200)
+		baud = 115200;
+	msm_hs_set_bps_locked(uport, baud);
+
+	msm_hs_reset(uport);
+
+	printk(KERN_INFO "msm_hs_serial: console setup on port #%d\n", uport->line);
+
+	return uart_set_options(uport, co, baud, parity, bits, flow);
+}
+
+static struct console msm_hs_console = {
+	.name = "ttyHS",
+	.write = msm_hs_console_write,
+	.device = uart_console_device,
+	.setup = msm_hs_console_setup,
+	.flags = CON_PRINTBUFFER,
+	.index = -1,
+	.data = &msm_hs_driver,
+};
+
+#define MSM_CONSOLE	&msm_hs_console
+
+#else
+#define MSM_CONSOLE	NULL
+#endif
 
 static int __init msm_hs_probe(struct platform_device *pdev)
 {
@@ -1647,6 +1797,9 @@ static void msm_hs_shutdown(struct uart_port *uport)
 static void __exit msm_serial_hs_exit(void)
 {
 	printk(KERN_INFO "msm_serial_hs module removed\n");
+#ifdef CONFIG_HS_SERIAL_MSM_CONSOLE
+	unregister_console(&msm_hs_console);
+#endif
 	platform_driver_unregister(&msm_serial_hs_platform_driver);
 	uart_unregister_driver(&msm_hs_driver);
 }
@@ -1664,7 +1817,7 @@ static struct uart_driver msm_hs_driver = {
 	.driver_name = "msm_serial_hs",
 	.dev_name = "ttyHS",
 	.nr = UARTDM_NR,
-	.cons = 0,
+	.cons = MSM_CONSOLE,
 };
 
 static struct uart_ops msm_hs_ops = {

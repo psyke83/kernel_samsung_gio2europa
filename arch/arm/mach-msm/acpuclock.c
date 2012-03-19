@@ -228,6 +228,7 @@ static struct clkctl_acpu_speed pll0_960_pll1_196_pll2_1200[] = {
 	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0}, {0, 0, 0} }
 };
 
+#ifdef CONFIG_800MHZ
 /* 7x27 normal with GSM capable modem - PLL0 and PLL1 swapped and pll2 @ 800 */
 static struct clkctl_acpu_speed pll0_960_pll1_245_pll2_800[] = {
 	{ 0, 19200, ACPU_PLL_TCXO, 0, 0, 19200, 0, 0, 30720 },
@@ -255,12 +256,15 @@ static struct clkctl_acpu_speed pll0_960_pll1_196_pll2_800[] = {
 	{ 1, 800000, ACPU_PLL_2, 2, 0, 200000, 3, 7, 120000 },
 	{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0}, {0, 0, 0} }
 };
+#endif
 
 #define PLL_196_MHZ	10
 #define PLL_245_MHZ	12
 #define PLL_491_MHZ	25
 #define PLL_768_MHZ	40
-#define PLL_800_MHZ	41
+#ifdef CONFIG_800MHZ
+#define PLL_800_MHZ 41
+#endif
 #define PLL_960_MHZ	50
 #define PLL_1056_MHZ	55
 #define PLL_1200_MHZ	62
@@ -286,8 +290,10 @@ static struct pll_freq_tbl_map acpu_freq_tbl_list[] = {
 	PLL_CONFIG(245, 960, 1200),
 	PLL_CONFIG(960, 196, 1200),
 	PLL_CONFIG(960, 245, 1200),
+#ifdef CONFIG_800MHZ
 	PLL_CONFIG(960, 196, 800),
 	PLL_CONFIG(960, 245, 800),
+#endif
 	{ 0, 0, 0, 0 }
 };
 
@@ -679,10 +685,15 @@ static void __init acpuclk_init(void)
 	}
 
 	drv_state.current_speed = speed;
+
+#ifdef CONFIG_800MHZ
+//	if (speed->pll >= 0)
+//		pc_pll_request(speed->pll, 1);
 	if (speed->pll != ACPU_PLL_TCXO)
 		if (pc_pll_request(speed->pll, 1))
 			pr_warning("Failed to vote for boot PLL\n");
-
+#endif
+	
 	res = ebi1_clk_set_min_rate(CLKVOTE_ACPUCLK, speed->axiclk_khz * 1000);
 	if (res < 0)
 		pr_warning("Setting AXI min rate failed (%d)\n", res);
@@ -769,7 +780,11 @@ static void __init acpu_freq_tbl_fixup(void)
 	 * the max that's supported by the board (RAM used in board).
 	 */
 	axi_160mhz = (pll0_l == PLL_960_MHZ || pll1_l == PLL_960_MHZ);
+#ifdef CONFIG_800MHZ
 	axi_200mhz = (pll2_l == PLL_1200_MHZ || pll2_l == PLL_800_MHZ);
+#else
+	axi_200mhz = (pll2_l == PLL_1200_MHZ);
+#endif
 	for (t = &acpu_freq_tbl[0]; t->a11clk_khz != 0; t++) {
 
 		if (pll0_needs_fixup && t->pll == ACPU_PLL_0)
@@ -924,8 +939,10 @@ void __init msm_acpu_clock_init(struct msm_acpu_clock_platform_data *clkdata)
 	pr_info("acpu_clock_init()\n");
 
 	mutex_init(&drv_state.lock);
+#ifdef CONFIG_800MHZ
 	if (cpu_is_msm7x27())
 		shared_pll_control_init();
+#endif
 	drv_state.acpu_switch_time_us = clkdata->acpu_switch_time_us;
 	drv_state.max_speed_delta_khz = clkdata->max_speed_delta_khz;
 	drv_state.vdd_switch_time_us = clkdata->vdd_switch_time_us;
@@ -937,6 +954,10 @@ void __init msm_acpu_clock_init(struct msm_acpu_clock_platform_data *clkdata)
 	acpuclk_init();
 	lpj_init();
 	print_acpu_freq_tbl();
+#ifndef CONFIG_800MHZ
+	if (cpu_is_msm7x27())
+		shared_pll_control_init();
+#endif
 #ifdef CONFIG_CPU_FREQ_MSM
 	cpufreq_table_init();
 	cpufreq_frequency_table_get_attr(freq_table, smp_processor_id());

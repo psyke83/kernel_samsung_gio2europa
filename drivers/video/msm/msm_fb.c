@@ -50,6 +50,9 @@
 #ifdef CONFIG_FB_MSM_LOGO
 #define INIT_IMAGE_FILE "/logo.rle"
 extern int load_565rle_image(char *filename);
+#ifdef CONFIG_FB_MSM_SEC_BOOTLOGO
+extern int load_565rle_image_onfb( char *filename, int start_x, int start_y);
+#endif
 #endif
 
 static unsigned char *fbram;
@@ -196,6 +199,56 @@ int msm_fb_detect_client(const char *name)
 	return ret;
 }
 
+/* Mark for GetLog */
+
+struct struct_frame_buf_mark {
+	u32 special_mark_1;
+	u32 special_mark_2;
+	u32 special_mark_3;
+	u32 special_mark_4;
+	void *p_fb;
+	u32 resX;
+	u32 resY;
+	u32 bpp;    //color depth : 16 or 24
+	u32 frames; // frame buffer count : 2
+};
+
+static struct struct_frame_buf_mark  frame_buf_mark = {
+	.special_mark_1 = (('*' << 24) | ('^' << 16) | ('^' << 8) | ('*' << 0)),
+	.special_mark_2 = (('I' << 24) | ('n' << 16) | ('f' << 8) | ('o' << 0)),
+	.special_mark_3 = (('H' << 24) | ('e' << 16) | ('r' << 8) | ('e' << 0)),
+	.special_mark_4 = (('f' << 24) | ('b' << 16) | ('u' << 8) | ('f' << 0)),
+	.p_fb   = 0,
+	
+#if defined(CONFIG_MACH_EUROPA)
+	.resX   = 256,
+	.resY   = 320,
+	.bpp    = 24,
+#endif	
+#if defined(CONFIG_MACH_CALLISTO)
+	.resX   = 256,
+	.resY   = 400,
+	.bpp    = 24,
+#endif	
+#if defined(CONFIG_MACH_COOPER) || defined(CONFIG_MACH_GIO)
+	.resX   = 320,
+	.resY   = 480,
+	.bpp    = 24,
+#endif	
+#if defined(CONFIG_MACH_BENI) || defined(CONFIG_MACH_TASS)
+	.resX   = 256,
+	.resY   = 320,
+	.bpp    = 18,
+#endif	
+#if defined(CONFIG_MACH_LUCAS)
+	.resX   = 320,
+	.resY   = 240,
+	.bpp    = 24,
+#endif	
+
+	.frames = 2
+};
+
 static int msm_fb_probe(struct platform_device *pdev)
 {
 	struct msm_fb_data_type *mfd;
@@ -223,6 +276,9 @@ static int msm_fb_probe(struct platform_device *pdev)
 
 	if (!msm_fb_resource_initialized)
 		return -EPERM;
+   	
+	/* Mark for GetLog */
+	frame_buf_mark.p_fb = fbram_phys - 0x13600000;
 
 	mfd = (struct msm_fb_data_type *)platform_get_drvdata(pdev);
 
@@ -314,7 +370,7 @@ static int msm_fb_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#if defined(CONFIG_PM) && !defined(CONFIG_HAS_EARLYSUSPEND)
+#if defined(CONFIG_PM) && ( !defined(CONFIG_HAS_EARLYSUSPEND))
 static int msm_fb_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct msm_fb_data_type *mfd;
@@ -424,11 +480,12 @@ static int msm_fb_resume_sub(struct msm_fb_data_type *mfd)
 }
 #endif
 
-#if defined(CONFIG_PM) && !defined(CONFIG_HAS_EARLYSUSPEND)
+#if defined(CONFIG_PM) && ( !defined(CONFIG_HAS_EARLYSUSPEND))
 static int msm_fb_resume(struct platform_device *pdev)
 {
 	/* This resume function is called when interrupt is enabled.
 	 */
+
 	int ret = 0;
 	struct msm_fb_data_type *mfd;
 
@@ -446,6 +503,7 @@ static int msm_fb_resume(struct platform_device *pdev)
 	release_console_sem();
 
 	return ret;
+
 }
 #else
 #define msm_fb_resume NULL
@@ -454,6 +512,7 @@ static int msm_fb_resume(struct platform_device *pdev)
 static struct platform_driver msm_fb_driver = {
 	.probe = msm_fb_probe,
 	.remove = msm_fb_remove,
+
 #ifndef CONFIG_HAS_EARLYSUSPEND
 	.suspend = msm_fb_suspend,
 	.resume = msm_fb_resume,
@@ -475,11 +534,13 @@ static void msmfb_early_suspend(struct early_suspend *h)
 
 static void msmfb_early_resume(struct early_suspend *h)
 {
+
 	struct msm_fb_data_type *mfd = container_of(h, struct msm_fb_data_type,
 						    early_suspend);
 	msm_fb_resume_sub(mfd);
 }
 #endif
+
 
 void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl, u32 save)
 {
@@ -503,6 +564,16 @@ void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl, u32 save)
 	}
 }
 
+#if defined(CONFIG_MACH_COOPER) || defined(CONFIG_MACH_BENI) || defined(CONFIG_MACH_TASS) || defined(CONFIG_MACH_LUCAS) || defined(CONFIG_MACH_GIO)
+struct msm_fb_data_type *cur_mfd;
+static void bckl_func(struct work_struct *ignored); 
+static DECLARE_DELAYED_WORK(bckl_work, bckl_func);
+
+static void bckl_func(struct work_struct *ignored) 
+{
+	msm_fb_set_backlight(cur_mfd,cur_mfd->bl_level,0);
+}
+#endif
 static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			    boolean op_enable)
 {
@@ -523,13 +594,19 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 	case FB_BLANK_UNBLANK:
 		if (!mfd->panel_power_on) {
 			msleep(16);
-			ret = pdata->on(mfd->pdev);
+			ret = pdata->on(mfd->pdev);	
+			msleep(16);
 			if (ret == 0) {
 				mfd->panel_power_on = TRUE;
 
+#if defined(CONFIG_MACH_COOPER) || defined(CONFIG_MACH_BENI) || defined(CONFIG_MACH_TASS) || defined(CONFIG_MACH_LUCAS) || defined(CONFIG_MACH_GIO)
+			cur_mfd = mfd;
+			schedule_delayed_work(&bckl_work, 10);
+
+#else
 				msm_fb_set_backlight(mfd,
 						     mfd->bl_level, 0);
-
+#endif
 /* ToDo: possible conflict with android which doesn't expect sw refresher */
 /*
 	  if (!mfd->hw_refresh)
@@ -557,11 +634,19 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			mfd->panel_power_on = FALSE;
 
 			msleep(16);
+#if defined(CONFIG_MACH_COOPER) || defined(CONFIG_MACH_BENI) || defined(CONFIG_MACH_TASS) || defined(CONFIG_MACH_LUCAS) || defined(CONFIG_MACH_GIO)
+			msm_fb_set_backlight(mfd, 0, 0);
+			ret = pdata->off(mfd->pdev);
+			if (ret)
+				mfd->panel_power_on = curr_pwr_state;
+#else
 			ret = pdata->off(mfd->pdev);
 			if (ret)
 				mfd->panel_power_on = curr_pwr_state;
 
 			msm_fb_set_backlight(mfd, 0, 0);
+#endif
+
 			mfd->op_enable = TRUE;
 		}
 		break;
@@ -628,6 +713,7 @@ static void msm_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 		msm_fb_pan_display(&var, info);
 	}
 }
+
 
 static int msm_fb_blank(int blank_mode, struct fb_info *info)
 {
@@ -798,6 +884,27 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		bpp = 3;
 		break;
 
+	//[qct patch
+	case MDP_XRGB_8888: 
+		fix->type = FB_TYPE_PACKED_PIXELS; 
+		fix->xpanstep = 1; 
+		fix->ypanstep = 1; 
+		var->vmode = FB_VMODE_NONINTERLACED; 
+		var->blue.offset = 8; 
+		var->green.offset = 16; 
+		var->red.offset = 24; 
+		var->blue.length = 8; 
+		var->green.length = 8; 
+		var->red.length = 8; 
+		var->blue.msb_right = 0; 
+		var->green.msb_right = 0; 
+		var->red.msb_right = 0; 
+		var->transp.offset = 0; 
+		var->transp.length = 8; 
+		bpp = 4; 
+	break; 
+	//]
+
 	case MDP_ARGB_8888:
 		fix->type = FB_TYPE_PACKED_PIXELS;
 		fix->xpanstep = 1;
@@ -876,8 +983,6 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		fix->line_length = panel_info->xres * bpp;
 
 	fix->smem_len = fix->line_length * panel_info->yres * mfd->fb_page;
-
-
 
 	mfd->var_xres = panel_info->xres;
 	mfd->var_yres = panel_info->yres;
@@ -969,6 +1074,45 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		return -EPERM;
 	}
 
+	#if 0 // minhyo - test screen
+	if (mfd->index == 0)
+	{
+		// draw frame
+		char    buff[256*2]={0,};
+		unsigned short *p;
+		#define SCREEN_WIDTH   256
+		int		x, y, width, height, i;
+
+		extern void lcd_disp_on_minhyodebug(void);
+		extern void lcd_ramwrite_minhyodebug(void);
+
+		// lcd_disp_on_minhyodebug();
+		// lcd_ramwrite_minhyodebug();
+
+		p = (unsigned short *)buff;
+		for(i=0; i < 80; i++)
+		{
+			// Red
+			p[i] = 0xF800;
+			// Green
+			p[i+80] = 0x07E0;
+			// Blue
+			p[i+160] = 0x001F;
+		}
+		x = 0;
+		y = 353;
+		width = 240;
+		height = 47;
+		
+		fbi->screen_base = fbi->screen_base + ( SCREEN_WIDTH * 2 * y) + (2 * x);
+		for(i = 0; i < height; i++)
+		{
+			memcpy(fbi->screen_base + (SCREEN_WIDTH * 2 * i), buff, SCREEN_WIDTH * 2);
+		}
+	}
+	#endif
+	
+
 	fbram += fix->smem_len;
 	fbram_phys += fix->smem_len;
 	fbram_size -= fix->smem_len;
@@ -977,8 +1121,34 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	    ("FrameBuffer[%d] %dx%d size=%d bytes is registered successfully!\n",
 	     mfd->index, fbi->var.xres, fbi->var.yres, fbi->fix.smem_len);
 
-#ifdef CONFIG_FB_MSM_LOGO
-	if (!load_565rle_image(INIT_IMAGE_FILE)) ;	/* Flip buffer */
+#ifdef CONFIG_FB_MSM_SEC_BOOTLOGO
+	// if (!load_565rle_image_onfb( "EUROPA.rle",0,99)) ;	/* Flip buffer */
+// 20100909 hongkuk.son for COOPER.rle ( booting logo )
+	// if (!load_565rle_image_onfb( "CALLISTO.rle",0,0)) ;	/* Flip buffer */
+
+#if defined(CONFIG_MACH_COOPER) 
+#if defined(CONFIG_MACH_COOPER_TELSTRA) || defined(CONFIG_MACH_GIO_TELSTRA)
+	if (!load_565rle_image_onfb( "COOPERT.rle",0,0)) ;	/* Flip buffer */
+#else
+	if (!load_565rle_image_onfb( "COOPER.rle",0,0)) ;	/* Flip buffer */
+#endif
+#endif
+
+#if defined(CONFIG_MACH_GIO)
+	if (!load_565rle_image_onfb( "GIO.rle",0,0)) ;	/* Flip buffer */
+#endif
+
+#if defined(CONFIG_MACH_BENI)
+	if (!load_565rle_image_onfb( "BENI.rle",0,0)) ;	/* Flip buffer */
+#endif	
+
+#if defined(CONFIG_MACH_TASS)
+	if (!load_565rle_image_onfb( "TASS.rle",0,0)) ;	/* Flip buffer */
+#endif	
+
+#if defined(CONFIG_MACH_LUCAS)
+	if (!load_565rle_image_onfb( "LUCAS.rle",0,0)) ;	/* Flip buffer */
+#endif	
 #endif
 	ret = 0;
 
@@ -1442,7 +1612,7 @@ static int mdp_blit_split_height(struct fb_info *info,
 	d_y_0 = req->dst_rect.y;
 	if (req->dst_rect.h % 32 == 3)
 		d_h_1 = (req->dst_rect.h - 3) / 2 - 1;
-	else if (req->dst_rect.h % 32 == 2)
+	else if(req->dst_rect.h % 32 == 2)				// patch jang.
 		d_h_1 = (req->dst_rect.h - 2) / 2 - 6;
 	else
 		d_h_1 = (req->dst_rect.h - 1) / 2 - 1;
@@ -1453,45 +1623,46 @@ static int mdp_blit_split_height(struct fb_info *info,
 		d_h_0 = 2;
 		d_y_1 = d_y_0 + 1;
 	}
+	/* break source roi */
+	if(((splitreq.flags & 0x07) == 0x04) ||
+			((splitreq.flags & 0x07) == 0x0)) {
+
+	if (splitreq.flags & MDP_ROT_90) {
+		s_y_0 = s_y_1 = req->src_rect.y;
+		s_h_0 = s_h_1 = req->src_rect.h;
+		s_x_0 = req->src_rect.x;
+		s_w_1 = (req->src_rect.w * d_h_1) / req->dst_rect.h;
+		s_w_0 = req->src_rect.w - s_w_1;
+		s_x_1 = s_x_0 + s_w_0;
+		if (d_h_1 >= 8 * s_w_1) {
+			s_w_1++;
+			s_x_1--;
+		}
+	} else {
+		s_x_0 = s_x_1 = req->src_rect.x;
+		s_w_0 = s_w_1 = req->src_rect.w;
+		s_y_0 = req->src_rect.y;
+		s_h_1 = (req->src_rect.h * d_h_1) / req->dst_rect.h;
+		s_h_0 = req->src_rect.h - s_h_1;
+		s_y_1 = s_y_0 + s_h_0;
+		if (d_h_1 >= 8 * s_h_1) {
+			s_h_1++;
+			s_y_1--;
+		}
+	}
+
 
 	/* blit first region */
-	if (((splitreq.flags & 0x07) == 0x04) ||
-		((splitreq.flags & 0x07) == 0x0)) {
+	splitreq.src_rect.h = s_h_0;
+	splitreq.src_rect.y = s_y_0;
+	splitreq.dst_rect.h = d_h_0;
+	splitreq.dst_rect.y = d_y_0;
+	splitreq.src_rect.x = s_x_0;
+	splitreq.src_rect.w = s_w_0;
+	splitreq.dst_rect.x = d_x_0;
+	splitreq.dst_rect.w = d_w_0;
 
-		if (splitreq.flags & MDP_ROT_90) {
-			s_y_0 = s_y_1 = req->src_rect.y;
-			s_h_0 = s_h_1 = req->src_rect.h;
-			s_x_0 = req->src_rect.x;
-			s_w_1 = (req->src_rect.w * d_h_1) / req->dst_rect.h;
-			s_w_0 = req->src_rect.w - s_w_1;
-			s_x_1 = s_x_0 + s_w_0;
-			if (d_h_1 >= 8 * s_w_1) {
-				s_w_1++;
-				s_x_1--;
-			}
-		} else {
-			s_x_0 = s_x_1 = req->src_rect.x;
-			s_w_0 = s_w_1 = req->src_rect.w;
-			s_y_0 = req->src_rect.y;
-			s_h_1 = (req->src_rect.h * d_h_1) / req->dst_rect.h;
-			s_h_0 = req->src_rect.h - s_h_1;
-			s_y_1 = s_y_0 + s_h_0;
-			if (d_h_1 >= 8 * s_h_1) {
-				s_h_1++;
-				s_y_1--;
-			}
-		}
-
-		splitreq.src_rect.h = s_h_0;
-		splitreq.src_rect.y = s_y_0;
-		splitreq.dst_rect.h = d_h_0;
-		splitreq.dst_rect.y = d_y_0;
-		splitreq.src_rect.x = s_x_0;
-		splitreq.src_rect.w = s_w_0;
-		splitreq.dst_rect.x = d_x_0;
-		splitreq.dst_rect.w = d_w_0;
 	} else {
-
 		if (splitreq.flags & MDP_ROT_90) {
 			s_y_0 = s_y_1 = req->src_rect.y;
 			s_h_0 = s_h_1 = req->src_rect.h;
@@ -1515,6 +1686,7 @@ static int mdp_blit_split_height(struct fb_info *info,
 				s_y_1--;
 			}
 		}
+		/* blit first region */
 		splitreq.src_rect.h = s_h_0;
 		splitreq.src_rect.y = s_y_0;
 		splitreq.dst_rect.h = d_h_1;
@@ -1524,22 +1696,24 @@ static int mdp_blit_split_height(struct fb_info *info,
 		splitreq.dst_rect.x = d_x_1;
 		splitreq.dst_rect.w = d_w_1;
 	}
+
 	ret = mdp_ppp_blit(info, &splitreq);
 	if (ret)
 		return ret;
 
+	if(((splitreq.flags & 0x07) == 0x04) ||
+			((splitreq.flags & 0x07) == 0x0)) {
 	/* blit second region */
-	if (((splitreq.flags & 0x07) == 0x04) ||
-		((splitreq.flags & 0x07) == 0x0)) {
-		splitreq.src_rect.h = s_h_1;
-		splitreq.src_rect.y = s_y_1;
-		splitreq.dst_rect.h = d_h_1;
-		splitreq.dst_rect.y = d_y_1;
-		splitreq.src_rect.x = s_x_1;
-		splitreq.src_rect.w = s_w_1;
-		splitreq.dst_rect.x = d_x_1;
-		splitreq.dst_rect.w = d_w_1;
+	splitreq.src_rect.h = s_h_1;
+	splitreq.src_rect.y = s_y_1;
+	splitreq.dst_rect.h = d_h_1;
+	splitreq.dst_rect.y = d_y_1;
+	splitreq.src_rect.x = s_x_1;
+	splitreq.src_rect.w = s_w_1;
+	splitreq.dst_rect.x = d_x_1;
+	splitreq.dst_rect.w = d_w_1;
 	} else {
+		/* blit second region */
 		splitreq.src_rect.h = s_h_1;
 		splitreq.src_rect.y = s_y_1;
 		splitreq.dst_rect.h = d_h_0;
@@ -1549,6 +1723,7 @@ static int mdp_blit_split_height(struct fb_info *info,
 		splitreq.dst_rect.x = d_x_0;
 		splitreq.dst_rect.w = d_w_0;
 	}
+
 	ret = mdp_ppp_blit(info, &splitreq);
 	return ret;
 }
@@ -1564,17 +1739,17 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 	int d_x_0, d_x_1, d_w_0, d_w_1, d_y_0, d_y_1, d_h_0, d_h_1;
 
 	if (req->flags & MDP_ROT_90) {
-		if (((req->dst_rect.h == 1) && ((req->src_rect.w != 1) ||
+		if(((req->dst_rect.h == 1) && ((req->src_rect.w != 1) ||
 			(req->dst_rect.w != req->src_rect.h))) ||
-			((req->dst_rect.w == 1) && ((req->src_rect.h != 1) ||
+			((req->dst_rect.w ==1) && ((req->src_rect.h != 1) ||
 			(req->dst_rect.h != req->src_rect.w)))) {
 			printk(KERN_ERR "mpd_ppp: error scaling when size is 1!\n");
 			return -EINVAL;
 		}
 	} else {
-		if (((req->dst_rect.w == 1) && ((req->src_rect.w != 1) ||
+		if(((req->dst_rect.w == 1) && ((req->src_rect.w != 1) ||
 			(req->dst_rect.h != req->src_rect.h))) ||
-			((req->dst_rect.h == 1) && ((req->src_rect.h != 1) ||
+			((req->dst_rect.h ==1) && ((req->src_rect.h != 1) ||
 			(req->dst_rect.w != req->src_rect.w)))) {
 			printk(KERN_ERR "mpd_ppp: error scaling when size is 1!\n");
 			return -EINVAL;
@@ -1598,10 +1773,11 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 	}
 	is_bpp_4 = (ret == 4) ? 1 : 0;
 
-	if ((is_bpp_4 && (remainder == 6 || remainder == 14 ||
-	remainder == 22 || remainder == 30)) || remainder == 3 ||
-	(remainder == 1 && req->dst_rect.w != 1) ||
-	(remainder == 2 && req->dst_rect.w != 2)) {
+	if ((is_bpp_4 && (remainder == 6 || remainder == 14 || 
+		remainder == 22 || remainder == 30)) || remainder == 3 || 
+		(remainder == 1 && req->dst_rect.w != 1)||
+		(remainder == 2 && req->dst_rect.w != 2)) {
+	
 		/* make new request as provide by user */
 		splitreq = *req;
 
@@ -1662,15 +1838,18 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 				}
 			}
 
-			splitreq.src_rect.h = s_h_0;
-			splitreq.src_rect.y = s_y_0;
-			splitreq.dst_rect.h = d_h_0;
-			splitreq.dst_rect.y = d_y_0;
-			splitreq.src_rect.x = s_x_0;
-			splitreq.src_rect.w = s_w_0;
-			splitreq.dst_rect.x = d_x_0;
-			splitreq.dst_rect.w = d_w_0;
+		/* blit first region */
+		splitreq.src_rect.h = s_h_0;
+		splitreq.src_rect.y = s_y_0;
+		splitreq.dst_rect.h = d_h_0;
+		splitreq.dst_rect.y = d_y_0;
+		splitreq.src_rect.x = s_x_0;
+		splitreq.src_rect.w = s_w_0;
+		splitreq.dst_rect.x = d_x_0;
+		splitreq.dst_rect.w = d_w_0;
+
 		} else {
+			
 			if (splitreq.flags & MDP_ROT_90) {
 				s_x_0 = s_x_1 = req->src_rect.x;
 				s_w_0 = s_w_1 = req->src_rect.w;
@@ -1696,6 +1875,8 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 					s_x_1--;
 				}
 			}
+
+			/* blit first region */
 			splitreq.src_rect.h = s_h_0;
 			splitreq.src_rect.y = s_y_0;
 			splitreq.dst_rect.h = d_h_1;
@@ -1704,6 +1885,8 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 			splitreq.src_rect.w = s_w_0;
 			splitreq.dst_rect.x = d_x_1;
 			splitreq.dst_rect.w = d_w_1;
+			
+
 		}
 
 		if ((splitreq.dst_rect.h % 32 == 3) ||
@@ -1861,16 +2044,17 @@ int mdp_blit(struct fb_info *info, struct mdp_blit_req *req)
 			return ret;
 
 		/* blit second region */
-		if (((splitreq.flags & 0x07) == 0x07) ||
+		if(((splitreq.flags & 0x07) == 0x07) ||
 			((splitreq.flags & 0x07) == 0x0)) {
-			splitreq.src_rect.h = s_h_1;
-			splitreq.src_rect.y = s_y_1;
-			splitreq.dst_rect.h = d_h_1;
-			splitreq.dst_rect.y = d_y_1;
-			splitreq.src_rect.x = s_x_1;
-			splitreq.src_rect.w = s_w_1;
-			splitreq.dst_rect.x = d_x_1;
-			splitreq.dst_rect.w = d_w_1;
+
+		splitreq.src_rect.h = s_h_1;
+		splitreq.src_rect.y = s_y_1;
+		splitreq.dst_rect.h = d_h_1;
+		splitreq.dst_rect.y = d_y_1;
+		splitreq.src_rect.x = s_x_1;
+		splitreq.src_rect.w = s_w_1;
+		splitreq.dst_rect.x = d_x_1;
+		splitreq.dst_rect.w = d_w_1;
 		} else {
 			splitreq.src_rect.h = s_h_1;
 			splitreq.src_rect.y = s_y_1;

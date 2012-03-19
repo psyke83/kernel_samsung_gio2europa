@@ -99,8 +99,8 @@ static long kgsl_gem_cache_range_op(const void *addr, unsigned long size,
 #ifdef CONFIG_OUTER_CACHE
 	unsigned long end;
 
-	BUG_ON(addr & (PAGE_SIZE - 1));
-	BUG_ON(size & (PAGE_SIZE - 1));
+	BUG_ON((unsigned int)addr & (PAGE_SIZE - 1));
+	BUG_ON((unsigned int)size & (PAGE_SIZE - 1));
 
 #endif
 	if (flags & KGSL_GEM_CACHE_FLUSH)

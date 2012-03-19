@@ -479,7 +479,7 @@ config MWL8K
 config LIBRA_SDIOIF
 	tristate "Qualcomm libra wlan SDIO driver"
 	depends on MMC_MSM
-	default m
+	default n
 	---help---
 	  A driver for Qualcomm WLAN SDIO Libra chipset.
 

@@ -89,6 +89,27 @@ static struct usb_descriptor_header *hs_diag_desc[] = {
 	(struct usb_descriptor_header *) &hs_bulk_out_desc,
 	NULL,
 };
+
+/* string descriptors: */
+
+#define DIAG_IDX	0
+
+/* static strings, in UTF-8 */
+static struct usb_string diag_string_defs[] = {
+	[DIAG_IDX].s = "Samsung Android DIAG",
+	{  /* ZEROES END LIST */ },
+};
+
+static struct usb_gadget_strings diag_string_table = {
+	.language =		0x0409,	/* en-us */
+	.strings =		diag_string_defs,
+};
+
+static struct usb_gadget_strings *diag_strings[] = {
+	&diag_string_table,
+	NULL,
+};
+
 /* list of requests */
 struct diag_req_entry {
 	struct list_head re_entry;
@@ -536,10 +557,19 @@ int diag_function_add(struct usb_configuration *c,
 				char *serial_number)
 {
 	struct diag_context *dev = &_context;
-	int ret;
+	int ret, status;
+
+	/* maybe allocate device-global string IDs, and patch descriptors */
+
+	status = usb_string_id(c->cdev);
+	if (status < 0)
+		return status;
+	diag_string_defs[DIAG_IDX].id = status;
+	intf_desc.iInterface = status;
 
 	printk(KERN_INFO "%s\n", __func__);
 	dev->function.name = "diag";
+	dev->function.strings = diag_strings;
 	dev->function.descriptors = fs_diag_desc;
 	dev->function.hs_descriptors = hs_diag_desc;
 	dev->function.bind = diag_function_bind;

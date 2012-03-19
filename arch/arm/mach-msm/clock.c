@@ -30,6 +30,11 @@ static LIST_HEAD(clocks);
 struct clk *msm_clocks;
 unsigned msm_num_clocks;
 
+// hsil
+int what_clk[103];
+int req_clk[103];
+EXPORT_SYMBOL(what_clk);
+EXPORT_SYMBOL(req_clk);
 /*
  * Bitmap of enabled clocks, excluding ACPU which is always
  * enabled
@@ -70,11 +75,17 @@ EXPORT_SYMBOL(clk_put);
 int clk_enable(struct clk *clk)
 {
 	unsigned long flags;
+
+	what_clk[clk->id] = 1;	
+//	printk("++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+//	printk("[HSIL] %s : %s: %d\n", __func__, clk->name, clk->id);
+//	printk("++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
 	spin_lock_irqsave(&clocks_lock, flags);
 	clk->count++;
 	if (clk->count == 1) {
 		clk->ops->enable(clk->id);
 		spin_lock(&clock_map_lock);
+		req_clk[clk->id] = 1;	
 		clock_map_enabled[BIT_WORD(clk->id)] |= BIT_MASK(clk->id);
 		spin_unlock(&clock_map_lock);
 	}
@@ -86,12 +97,18 @@ EXPORT_SYMBOL(clk_enable);
 void clk_disable(struct clk *clk)
 {
 	unsigned long flags;
+	
+	what_clk[clk->id] = 0;	
+//	printk("----------------------------------------------------\n");	
+//	printk("[HSIL] %s : %s: %d\n", __func__, clk->name, clk->id);
+//	printk("----------------------------------------------------\n");	
 	spin_lock_irqsave(&clocks_lock, flags);
 	BUG_ON(clk->count == 0);
 	clk->count--;
 	if (clk->count == 0) {
 		clk->ops->disable(clk->id);
 		spin_lock(&clock_map_lock);
+		req_clk[clk->id] = 0;	
 		clock_map_enabled[BIT_WORD(clk->id)] &= ~BIT_MASK(clk->id);
 		spin_unlock(&clock_map_lock);
 	}
@@ -281,7 +298,14 @@ int msm_clock_get_name(uint32_t id, char *name, uint32_t size)
 void __init msm_clock_init(struct clk *clock_tbl, unsigned num_clocks)
 {
 	unsigned n;
+	// hsil
+	int i;
 
+	for (i=0; i<103; i++)
+	{
+		what_clk[i] = 0;
+		req_clk[i] = 0;
+	}
 	/* Do SoC-speficic clock init operations. */
 	msm_clk_soc_init();
 

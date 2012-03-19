@@ -77,7 +77,7 @@ struct gpio_event_matrix_info {
 	/* initialize to gpio_event_matrix_func */
 	struct gpio_event_info info;
 	/* size must be ninputs * noutputs */
-	const unsigned short *keymap;
+	unsigned short *keymap;
 	unsigned int *input_gpios;
 	unsigned int *output_gpios;
 	unsigned int ninputs;

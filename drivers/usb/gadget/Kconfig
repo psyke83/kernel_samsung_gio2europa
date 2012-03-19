@@ -897,6 +897,14 @@ config USB_CSW_HACK
 	 storage
 
 	default y
+	
+config USB_SAMSUNG_DRIVER
+	boolean "USB Samsung Driver (Host PC)"
+	depends on USB_ANDROID
+	help
+	  USB PC host driver is Samsung driver.
+
+	default y
 
 config USB_CDC_COMPOSITE
 	tristate "CDC Composite Device (Ethernet and ACM)"

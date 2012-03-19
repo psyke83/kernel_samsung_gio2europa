@@ -29,6 +29,14 @@
 #include <mach/board.h>
 #include <mach/msm_rpcrouter.h>
 #include <mach/debug_mm.h>
+#include <mach/gpio.h>
+
+#define FEATURE_MAX8899_AMP_OFF
+
+#ifdef FEATURE_MAX8899_AMP_OFF
+#include "../proc_comm.h"
+#define SMEM_PROC_COMM_AMP_OFF			PCOM_OEM_MAX8899_AMP_OFF
+#endif
 
 struct snd_ctxt {
 	struct mutex lock;
@@ -55,6 +63,7 @@ static struct snd_ctxt the_snd;
 #define SND_SET_VOLUME_PROC 3
 #define SND_AVC_CTL_PROC 29
 #define SND_AGC_CTL_PROC 30
+#define SND_SET_EXTAMP_PROC 100 /* AMP Set Volume */
 
 struct rpc_snd_set_device_args {
 	uint32_t device;
@@ -86,6 +95,15 @@ struct rpc_snd_agc_ctl_args {
 	uint32_t client_data;
 };
 
+struct rpc_snd_set_extamp_args {
+	uint32_t device;
+	uint32_t speaker_volume;
+	uint32_t headset_volume;
+
+	uint32_t cb_func;
+	uint32_t client_data;
+};
+
 struct snd_set_device_msg {
 	struct rpc_request_hdr hdr;
 	struct rpc_snd_set_device_args args;
@@ -104,6 +122,11 @@ struct snd_avc_ctl_msg {
 struct snd_agc_ctl_msg {
 	struct rpc_request_hdr hdr;
 	struct rpc_snd_agc_ctl_args args;
+};
+
+struct snd_set_extamp_msg {
+	struct rpc_request_hdr hdr;
+	struct rpc_snd_set_extamp_args args;
 };
 
 struct snd_endpoint *get_snd_endpoints(int *size);
@@ -149,14 +172,20 @@ static long snd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct snd_set_volume_msg vmsg;
 	struct snd_avc_ctl_msg avc_msg;
 	struct snd_agc_ctl_msg agc_msg;
+	struct snd_set_extamp_msg emsg;
 
 	struct msm_snd_device_config dev;
 	struct msm_snd_volume_config vol;
+	struct msm_snd_extamp_config extamp;
 	struct snd_ctxt *snd = file->private_data;
 	int rc = 0;
 
 	uint32_t avc, agc;
 
+#ifdef FEATURE_MAX8899_AMP_OFF
+	int data1 = 0;
+	int data2 = 0;
+#endif
 	mutex_lock(&snd->lock);
 	switch (cmd) {
 	case SND_SET_DEVICE:
@@ -178,7 +207,7 @@ static long snd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		dmsg.args.cb_func = -1;
 		dmsg.args.client_data = 0;
 
-		MM_INFO("snd_set_device %d %d %d\n", dev.device,
+		MM_ERR("snd_set_device %d %d %d\n", dev.device,
 				dev.ear_mute, dev.mic_mute);
 
 		rc = msm_rpc_call(snd->ept,
@@ -205,7 +234,7 @@ static long snd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		vmsg.args.cb_func = -1;
 		vmsg.args.client_data = 0;
 
-		MM_INFO("snd_set_volume %d %d %d\n", vol.device,
+		MM_ERR("snd_set_volume %d %d %d\n", vol.device,
 				vol.method, vol.volume);
 
 		rc = msm_rpc_call(snd->ept,
@@ -264,8 +293,50 @@ static long snd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		rc = get_endpoint(snd, arg);
 		break;
 
+	case SND_SET_EXTAMP:
+		if (copy_from_user(&extamp, (void __user *) arg, sizeof(extamp))) {
+			MM_ERR("set extamp: invalid pointer\n");
+			rc = -EFAULT;
+			break;
+		}
+
+		emsg.args.device = cpu_to_be32(extamp.device);
+		emsg.args.speaker_volume = cpu_to_be32(extamp.speaker_volume);
+		emsg.args.headset_volume = cpu_to_be32(extamp.headset_volume);
+		emsg.args.cb_func = -1;
+		emsg.args.client_data = 0;
+
+		MM_ERR("snd_set_extamp %d %d %d\n", extamp.device,
+				extamp.speaker_volume, extamp.headset_volume);
+
+		rc = msm_rpc_call(snd->ept,
+			SND_SET_EXTAMP_PROC,
+			&emsg, sizeof(emsg), 5 * HZ);
+		break;
+	case SND_SET_MAIN_MIC:
+		rc = gpio_direction_output(89, 1);
+		break;
+	case SND_SET_SUB_MIC:
+		rc = gpio_direction_output(89, 0);
+		break;
+#ifdef FEATURE_MAX8899_AMP_OFF
+	case SND_MAX8899_AMP_OFF:
+		if (copy_from_user(&data1, (void __user *) arg, sizeof(data1))) {
+			MM_ERR("amp off: invalid pointer\n");
+			rc = -EFAULT;
+			break;
+		}
+		rc = msm_proc_comm(SMEM_PROC_COMM_AMP_OFF, &data1, &data2);
+		if(rc < 0)
+		{
+			printk("%s max8899 amp off proccomm fail\n", __func__);
+			return rc;
+		}
+		MM_ERR("snd_max8899_amp_off %d\n", data1);
+		break;
+#endif
 	default:
-		MM_ERR("unknown command\n");
+		MM_ERR("unknown command %d\n", cmd);
 		rc = -EINVAL;
 		break;
 	}

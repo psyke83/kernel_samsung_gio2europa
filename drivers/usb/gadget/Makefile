@@ -64,7 +64,7 @@ g_cdc-objs			:= cdc2.o
 g_android-objs			:= android.o f_adb.o f_mass_storage.o \
 					u_serial.o f_acm.o u_ether.o \
 					$(F_ECM) $(F_SERIAL) $(F_DIAG) \
-					$(F_RMNET) $(F_RNDIS)
+					$(F_RMNET) $(F_RNDIS) serial_acm.o
 
 obj-$(CONFIG_USB_ZERO)		+= g_zero.o
 obj-$(CONFIG_USB_AUDIO)		+= g_audio.o

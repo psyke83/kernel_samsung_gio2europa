@@ -47,8 +47,11 @@ static int lcdc_on(struct platform_device *pdev);
 static struct platform_device *pdev_list[MSM_FB_MAX_DEV_LIST];
 static int pdev_list_cnt;
 
-static struct clk *pixel_mdp_clk; /* drives the lcdc block in mdp */
-static struct clk *pixel_lcdc_clk; /* drives the lcdc interface */
+static struct clk *mdp_lcdc_pclk_clk;
+static struct clk *mdp_lcdc_pad_pclk_clk;
+
+int mdp_lcdc_pclk_clk_rate;
+int mdp_lcdc_pad_pclk_clk_rate;
 
 static struct platform_driver lcdc_driver = {
 	.probe = lcdc_probe,
@@ -69,8 +72,8 @@ static int lcdc_off(struct platform_device *pdev)
 
 	ret = panel_next_off(pdev);
 
-	clk_disable(pixel_mdp_clk);
-	clk_disable(pixel_lcdc_clk);
+	clk_disable(mdp_lcdc_pclk_clk);
+	clk_disable(mdp_lcdc_pad_pclk_clk);
 
 	if (lcdc_pdata && lcdc_pdata->lcdc_power_save)
 		lcdc_pdata->lcdc_power_save(0);
@@ -107,24 +110,20 @@ static int lcdc_on(struct platform_device *pdev)
 				  pm_qos_rate);
 	mfd = platform_get_drvdata(pdev);
 
-	ret = clk_set_rate(pixel_mdp_clk, mfd->fbi->var.pixclock);
-	if (ret) {
-		pr_err("%s: Can't set MDP LCDC pixel clock to rate %u\n",
-			__func__, mfd->fbi->var.pixclock);
-		goto out;
-	}
-
-	clk_enable(pixel_mdp_clk);
-	clk_enable(pixel_lcdc_clk);
+	clk_enable(mdp_lcdc_pclk_clk);
+	clk_enable(mdp_lcdc_pad_pclk_clk);
 
 	if (lcdc_pdata && lcdc_pdata->lcdc_power_save)
 		lcdc_pdata->lcdc_power_save(1);
 	if (lcdc_pdata && lcdc_pdata->lcdc_gpio_config)
 		ret = lcdc_pdata->lcdc_gpio_config(1);
 
-	ret = panel_next_on(pdev);
+	clk_set_rate(mdp_lcdc_pclk_clk, mfd->fbi->var.pixclock);
+	clk_set_rate(mdp_lcdc_pad_pclk_clk, mfd->fbi->var.pixclock);
+	mdp_lcdc_pclk_clk_rate = clk_get_rate(mdp_lcdc_pclk_clk);
+	mdp_lcdc_pad_pclk_clk_rate = clk_get_rate(mdp_lcdc_pad_pclk_clk);
 
-out:
+	ret = panel_next_on(pdev);
 	return ret;
 }
 
@@ -185,13 +184,22 @@ static int lcdc_probe(struct platform_device *pdev)
 	 */
 	mfd->panel_info = pdata->panel_info;
 
+#if 1
+	//mfd->fb_imgType = MDP_XRGB_8888; 	// qct patch
+	mfd->fb_imgType = MDP_RGBA_8888; 	// qct patch
+#else
+#ifdef MSMFB_FRAMEBUF_32
 	if (mfd->index == 0)
-		mfd->fb_imgType = MSMFB_DEFAULT_TYPE;
+		mfd->fb_imgType = MDP_RGBA_8888; /* primary */
 	else
-		mfd->fb_imgType = MDP_RGB_565;
+		mfd->fb_imgType = MDP_RGB_565;	/* secondary */
+#else
+	mfd->fb_imgType = MDP_RGB_565;
+#endif
+#endif
 
 	fbi = mfd->fbi;
-	fbi->var.pixclock = clk_round_rate(pixel_mdp_clk,
+	fbi->var.pixclock = clk_round_rate(mdp_lcdc_pclk_clk,
 					mfd->panel_info.clk_rate);
 	fbi->var.left_margin = mfd->panel_info.lcdc.h_back_porch;
 	fbi->var.right_margin = mfd->panel_info.lcdc.h_front_porch;
@@ -234,30 +242,29 @@ static int lcdc_register_driver(void)
 static int __init lcdc_driver_init(void)
 {
 
-	pixel_mdp_clk = clk_get(NULL, "pixel_mdp_clk");
-	if (IS_ERR(pixel_mdp_clk))
-		pixel_mdp_clk = NULL;
+	mdp_lcdc_pclk_clk = clk_get(NULL, "pixel_mdp_clk");
+	if (IS_ERR(mdp_lcdc_pclk_clk))
+		mdp_lcdc_pclk_clk = NULL;
 
-	if (pixel_mdp_clk) {
-		pixel_lcdc_clk = clk_get(NULL, "pixel_lcdc_clk");
-		if (IS_ERR(pixel_lcdc_clk)) {
+	if (mdp_lcdc_pclk_clk) {
+		mdp_lcdc_pad_pclk_clk = clk_get(NULL, "pixel_lcdc_clk");
+		if (IS_ERR(mdp_lcdc_pad_pclk_clk)) {
 			printk(KERN_ERR "Couldnt find pixel_lcdc_clk\n");
 			return -EINVAL;
 		}
 	} else {
-		pixel_mdp_clk = clk_get(NULL, "mdp_lcdc_pclk_clk");
-		if (IS_ERR(pixel_mdp_clk)) {
+		mdp_lcdc_pclk_clk = clk_get(NULL, "mdp_lcdc_pclk_clk");
+		if (IS_ERR(mdp_lcdc_pclk_clk)) {
 			printk(KERN_ERR "Couldnt find mdp_lcdc_pclk_clk\n");
 			return -EINVAL;
 		}
 
-		pixel_lcdc_clk = clk_get(NULL, "mdp_lcdc_pad_pclk_clk");
-		if (IS_ERR(pixel_lcdc_clk)) {
+		mdp_lcdc_pad_pclk_clk = clk_get(NULL, "mdp_lcdc_pad_pclk_clk");
+		if (IS_ERR(mdp_lcdc_pad_pclk_clk)) {
 			printk(KERN_ERR "Couldnt find mdp_lcdc_pad_pclk_clk\n");
 			return -EINVAL;
 		}
 	}
-
 	pm_qos_add_requirement(PM_QOS_SYSTEM_BUS_FREQ , "lcdc",
 			       PM_QOS_DEFAULT_VALUE);
 	return lcdc_register_driver();

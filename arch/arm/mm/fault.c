@@ -37,6 +37,8 @@
 #define FSR_FS4			(1 << 10)
 #define FSR_FS3_0		(15)
 
+extern int dump_enable_flag;		// debug level : high (user fault)
+
 static inline int fsr_fs(unsigned int fsr)
 {
 	return (fsr & FSR_FS3_0) | (fsr & FSR_FS4) >> 6;
@@ -169,6 +171,20 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		show_regs(regs);
 	}
 #endif
+
+	if(dump_enable_flag == 2)		// debug level : high (user fault)
+	{
+		bust_spinlocks(1);
+		printk(KERN_ALERT
+			"Stop to handle kernel %s at virtual address %08lx\n",
+			(addr < PAGE_SIZE) ? "NULL pointer dereference" :
+			"paging request", addr);
+		
+		show_pte(tsk->mm, addr);
+		die("User fault", regs, fsr);
+		bust_spinlocks(0);
+		do_exit(SIGKILL);
+	}
 
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;

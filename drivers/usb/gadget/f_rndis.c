@@ -230,7 +230,7 @@ static struct usb_endpoint_descriptor fs_out_desc = {
 
 static struct usb_descriptor_header *eth_fs_function[] = {
 	/* control interface matches ACM, not Ethernet */
-	(struct usb_descriptor_header *) &rndis_interface_assoc_desc,
+//	(struct usb_descriptor_header *) &rndis_interface_assoc_desc,
 	(struct usb_descriptor_header *) &rndis_control_intf,
 	(struct usb_descriptor_header *) &header_desc,
 	(struct usb_descriptor_header *) &call_mgmt_descriptor,
@@ -275,7 +275,7 @@ static struct usb_endpoint_descriptor hs_out_desc = {
 
 static struct usb_descriptor_header *eth_hs_function[] = {
 	/* control interface matches ACM, not Ethernet */
-	(struct usb_descriptor_header *) &rndis_interface_assoc_desc,
+//	(struct usb_descriptor_header *) &rndis_interface_assoc_desc,
 	(struct usb_descriptor_header *) &rndis_control_intf,
 	(struct usb_descriptor_header *) &header_desc,
 	(struct usb_descriptor_header *) &call_mgmt_descriptor,
@@ -709,11 +709,10 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	rndis_set_param_medium(rndis->config, NDIS_MEDIUM_802_3, 0);
 	rndis_set_host_mac(rndis->config, rndis->ethaddr);
 
-#if 0
+#if 1
 // FIXME
-	if (rndis_set_param_vendor(rndis->config, vendorID,
-				manufacturer))
-		goto fail0;
+	if (rndis_set_param_vendor(rndis->config, 0x04E8, "SAMSUNG"))
+		goto fail;
 #endif
 
 	/* NOTE:  all that is done without knowing or caring about

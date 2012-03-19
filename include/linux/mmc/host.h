@@ -15,7 +15,6 @@
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
-
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
 	unsigned short	vdd;

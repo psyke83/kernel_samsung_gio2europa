@@ -28,6 +28,7 @@
 #include <linux/mmc/sdio_ids.h>
 #endif
 
+
 static int sdio_read_fbr(struct sdio_func *func)
 {
 	int ret;
@@ -247,9 +248,9 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
 	 * Inform the card of the voltage
 	 */
 	if (!powered_resume) {
-		err = mmc_send_io_op_cond(host, host->ocr, &ocr);
-		if (err)
-			goto err;
+	err = mmc_send_io_op_cond(host, host->ocr, &ocr);
+	if (err)
+		goto err;
 	}
 
 	/*
@@ -459,17 +460,18 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 
 static int mmc_sdio_resume(struct mmc_host *host)
 {
-	int i, err;
+	int i, err = 0;
 
 	BUG_ON(!host);
 	BUG_ON(!host->card);
 
 	/* Basic card reinitialization. */
-	mmc_claim_host(host);
-	err = mmc_sdio_init_card(host, host->ocr, host->card,
-				 (host->pm_flags & MMC_PM_KEEP_POWER));
-	mmc_release_host(host);
-
+	if(!(host->pm_flags & MMC_PM_KEEP_POWER)) {
+		mmc_claim_host(host);
+		err = mmc_sdio_init_card(host, host->ocr, host->card,
+					 (host->pm_flags & MMC_PM_KEEP_POWER));
+		mmc_release_host(host);
+	}	
 	/*
 	 * If the card looked to be the same as before suspending, then
 	 * we proceed to resume all card functions.  If one of them returns

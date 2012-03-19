@@ -808,6 +808,14 @@ unknown:
 		 * take such requests too, if that's ever needed:  to work
 		 * in config 0, etc.
 		 */
+
+		/* To pass USB CV test*/
+		if((ctrl->bRequest == USB_REQ_GET_DESCRIPTOR) && (ctrl->bRequestType != USB_DIR_IN))
+			goto done;
+		
+		if (cdev->config == NULL)
+			return value;
+		
 		if ((ctrl->bRequestType & USB_RECIP_MASK)
 				== USB_RECIP_INTERFACE) {
 			struct usb_configuration	*config;

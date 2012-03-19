@@ -125,6 +125,18 @@
 #define MSM_CAM_CTRL_CMD_DONE  0
 #define MSM_CAM_SENSOR_VFE_CMD 1
 
+#if 1//PCAM
+typedef struct{
+	unsigned short mode;
+	unsigned short address;
+	unsigned short value_1;
+	unsigned short value_2;
+	unsigned short value_3;
+} ioctl_pcam_info_8bit;
+
+#define MSM_CAM_IOCTL_PCAM_CTRL_8BIT   _IOWR(MSM_CAM_IOCTL_MAGIC, 40, ioctl_pcam_info_8bit)
+#endif//PCAM
+
 /*****************************************************
  *  structure
  *****************************************************/
@@ -315,6 +327,30 @@ struct outputCfg {
 #define OUTPUT_TYPE_S		3
 #define OUTPUT_TYPE_V		4
 
+#define CAMERA_BRIGTHNESS_0		0
+#define CAMERA_BRIGTHNESS_1		1
+#define CAMERA_BRIGTHNESS_2		2
+#define CAMERA_BRIGTHNESS_3		3
+#define CAMERA_BRIGTHNESS_4		4
+#define CAMERA_BRIGTHNESS_5		5
+#define CAMERA_BRIGTHNESS_6		6
+
+#define CAMERA_WB_AUTO				0
+#define CAMERA_WB_INCANDESCENT		1
+#define CAMERA_WB_FLUORESCENT		2
+#define CAMERA_WB_DAYLIGHT			3
+#define CAMERA_WB_CLOUDY_DAYLIGHT	4
+
+#define CAMERA_ISOValue_AUTO		0
+#define CAMERA_ISOValue_100		1
+#define CAMERA_ISOValue_200		2
+#define CAMERA_ISOValue_400		3
+
+#define CAMERA_AEC_CENTER_WEIGHTED		1
+#define CAMERA_AEC_SPOT_METERING		2
+#define CAMERA_AEC_FRAME_AVERAGE		0
+ 
+
 struct msm_frame {
 	struct timespec ts;
 	int path;
@@ -391,7 +427,9 @@ struct msm_snapshot_pp_status {
 #define CFG_GET_AF_MAX_STEPS		26
 #define CFG_GET_PICT_MAX_EXP_LC		27
 #define CFG_SEND_WB_INFO    28
-#define CFG_MAX 			29
+// Features for EUROPA
+#define CFG_SET_ISO			29
+#define CFG_MAX 30
 
 #define MOVE_NEAR	0
 #define MOVE_FAR	1
@@ -414,6 +452,8 @@ struct msm_snapshot_pp_status {
 #define CAMERA_EFFECT_BLACKBOARD	7
 #define CAMERA_EFFECT_AQUA		8
 #define CAMERA_EFFECT_MAX		9
+
+
 
 struct sensor_pict_fps {
 	uint16_t prevfps;
@@ -448,6 +488,13 @@ struct sensor_cfg_data {
 
 	union {
 		int8_t effect;
+		
+#if defined(CONFIG_MACH_EUROPA)
+		int8_t brightness;
+		int8_t whitebalance;
+		int8_t iso;
+		int8_t metering;
+#endif
 		uint8_t lens_shading;
 		uint16_t prevl_pf;
 		uint16_t prevp_pl;

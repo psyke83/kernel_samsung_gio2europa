@@ -1,40 +1,100 @@
 comment "Camera Sensor Selection"
 config MT9T013
 	bool "Sensor mt9t013 (BAYER 3M)"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
-	default y
+	depends on MSM_CAMERA
+	default n
 	---help---
 	  MICRON 3M Bayer Sensor with AutoFocus
 
 config MT9D112
 	bool "Sensor mt9d112 (YUV 2M)"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
-	default y
+	depends on MSM_CAMERA
+	default n
 	---help---
 	  MICRON 2M YUV Sensor
-config IMX074
-	bool "Sensor IMX074 (BAYER 13.5M)"
-	depends on MSM_CAMERA && ARCH_MSM8X60
-	default y
+
+config S5K4CA
+	bool "Sensor s5k4ca (3M)"
+	default n
 	---help---
-	SONY 13.5 MP Bayer Sensor
-config VX6953
-	bool "Sensor VX6953 (BAYER 5M)"
-	depends on MSM_CAMERA && ARCH_MSM7X30
-	default y
+	  SAMSUNG 3M CMOS Sensor
+
+config SR200PC10
+	bool "Sensor sr200pc10 (2M)"
+	default n
 	---help---
-	STM 5M Bayer Sensor with EDOF
+	  SILICON-FILE 2M CMOS Sensor
+
+config S5K5CA
+	bool "Sensor s5k5ca 1/5 (3M)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+
+config S5K5CAFF
+	bool "Sensor s5k5caff 1/5 (3M)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+
+config S5K5CCAF
+	bool "Sensor s5k5cc 1/5 (3M/AF)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+
+config S5K5CCAF_GIO
+	bool "Sensor s5k5cc 1/5 (3M/AF)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+	  
+config S5K5CAGX_GIO
+	bool "Sensor s5k5cc 1/5 (3M/AF)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+	  
+config S5K5CCFF
+	bool "Sensor s5k5cc 1/5 (3M/FF)"
+	default n
+	---help---
+	  SAMSUNG 3M CMOS Sensor
+
+config ISX006
+	bool "Sensor isx006 (5M)"
+	default n
+	---help---
+	  SONY 5M CMOS Sensor 
+
+config S5K4ECGX
+	bool "Sensor s5k4ecgx (5M)"
+	default n
+	---help---
+	  SAMSUNG LSI 5M CMOS Sensor 	  
+
+config S5K4ECGX_COOPER
+	bool "Sensor s5k4ecgx (5M)"
+	default n
+	---help---
+	  SAMSUNG LSI 5M CMOS Sensor 	  
+
+config S5K4ECGX_GIO
+	bool "Sensor s5k4ecgx (5M)"
+	default n
+	---help---
+	  SAMSUNG LSI 5M CMOS Sensor 	  
 
 config MT9P012
 	bool "Sensor mt9p012 (BAYER 5M)"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
-	default y
+	depends on MSM_CAMERA
+	default n
 	---help---
 	  MICRON 5M Bayer Sensor with Autofocus
 
 choice
 	prompt "AF module"
-	depends on MT9P012 && !ARCH_MSM8X60
+	depends on MT9P012
 	default MSM_CAMERA_AF_FOXCONN
 
 config MSM_CAMERA_AF_FOXCONN
@@ -51,27 +111,27 @@ endchoice
 
 config MT9P012_KM
 	bool "Sensor mt9p012 KM module (BAYER 5M)"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
+	depends on MSM_CAMERA
 	default y
 	---help---
 	  MICRON 5M Bayer Sensor KM modules with Autofocus
 
 config S5K3E2FX
 	bool "Sensor s5k3e2fx (Samsung 5M)"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
+	depends on MSM_CAMERA
 	default y
 	---help---
 	  Samsung 5M with Autofocus
 
 config VB6801
 	bool "Sensor vb6801"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
+	depends on MSM_CAMERA
 	---help---
 	  5M with flash
 
 config MSM_CAMERA_FLASH
 	bool "Qualcomm MSM camera flash support"
-	depends on MSM_CAMERA && !ARCH_MSM8X60
+	depends on MSM_CAMERA
 	default y
 	---help---
 	  Enable support for LED flash for msm camera

@@ -577,6 +577,26 @@ ep_desc(struct usb_gadget *g, struct usb_endpoint_descriptor *fs,
 	return fs;
 }
 
+/* string descriptors: */
+
+#define F_UMS_IDX	0
+
+/* static strings, in UTF-8 */
+static struct usb_string f_ums_string_defs[] = {
+	[F_UMS_IDX].s = "Android UMS",
+	{  /* ZEROES END LIST */ },
+};
+
+static struct usb_gadget_strings f_ums_string_table = {
+	.language =		0x0409,	/* en-us */
+	.strings =		f_ums_string_defs,
+};
+
+static struct usb_gadget_strings *f_ums_strings[] = {
+	&f_ums_string_table,
+	NULL,
+};
+
 /*-------------------------------------------------------------------------*/
 
 /* These routines may be called in process context or in_irq */
@@ -619,7 +639,7 @@ static void bulk_in_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct fsg_dev		*fsg = ep->driver_data;
 	struct fsg_buffhd	*bh = req->context;
-	unsigned long		flags;
+	unsigned long flags;
 
 	if (req->status || req->actual != req->length)
 		DBG(fsg, "%s --> %d, %u/%u\n", __func__,
@@ -638,7 +658,7 @@ static void bulk_out_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct fsg_dev		*fsg = ep->driver_data;
 	struct fsg_buffhd	*bh = req->context;
-	unsigned long		flags;
+	unsigned long flags;
 
 	dump_msg(fsg, "bulk-out", req->buf, req->actual);
 	if (req->status || req->actual != bh->bulk_out_intended_length)
@@ -750,9 +770,14 @@ static void start_transfer(struct fsg_dev *fsg, struct usb_ep *ep,
 		 * submissions if DMA is enabled. */
 		if (rc != -ESHUTDOWN && !(rc == -EOPNOTSUPP &&
 						req->length == 0))
+			printk(KERN_ERR "error in submission: %s --> %d\n",
+				(ep == fsg->bulk_in ? "bulk-in" : "bulk-out"),
+				rc);
+#if 0
 			WARN(fsg, "error in submission: %s --> %d\n",
 				(ep == fsg->bulk_in ? "bulk-in" : "bulk-out"),
 				rc);
+#endif
 	}
 }
 
@@ -1304,7 +1329,7 @@ static int do_verify(struct fsg_dev *fsg)
 static int do_inquiry(struct fsg_dev *fsg, struct fsg_buffhd *bh)
 {
 	u8	*buf = (u8 *) bh->buf;
-
+	
 	if (!fsg->curlun) {		/* Unsupported LUNs are okay */
 		fsg->bad_lun_okay = 1;
 		memset(buf, 0, 36);
@@ -1319,8 +1344,10 @@ static int do_inquiry(struct fsg_dev *fsg, struct fsg_buffhd *bh)
 	buf[3] = 2;		/* SCSI-2 INQUIRY data format */
 	buf[4] = 31;		/* Additional length */
 				/* No special options */
+
 	sprintf(buf + 8, "%-8s%-16s%04x", fsg->vendor,
 			fsg->product, fsg->release);
+
 	return 36;
 }
 
@@ -2544,7 +2571,7 @@ static int fsg_main_thread(void *fsg_)
 		if (!exception_in_progress(fsg))
 			fsg->state = FSG_STATE_IDLE;
 		spin_unlock_irqrestore(&fsg->lock, flags);
-	}
+		}
 
 	spin_lock_irqsave(&fsg->lock, flags);
 	fsg->thread_task = NULL;
@@ -2997,6 +3024,7 @@ int mass_storage_function_add(struct usb_composite_dev *cdev,
 	struct usb_configuration *c)
 {
 	int		rc;
+	int		status;
 	struct fsg_dev	*fsg;
 
 	printk(KERN_INFO "mass_storage_function_add\n");
@@ -3004,6 +3032,13 @@ int mass_storage_function_add(struct usb_composite_dev *cdev,
 	if (rc)
 		return rc;
 	fsg = the_fsg;
+
+    /*ums id already is assigned in Debug USB off mode*/
+	status = usb_string_id(c->cdev);
+	if (status < 0)
+		return status;
+	f_ums_string_defs[F_UMS_IDX].id = status;
+	intf_desc.iInterface = status;
 
 	spin_lock_init(&fsg->lock);
 	init_rwsem(&fsg->filesem);
@@ -3023,6 +3058,7 @@ int mass_storage_function_add(struct usb_composite_dev *cdev,
 
 	fsg->cdev = cdev;
 	fsg->function.name = shortname;
+	fsg->function.strings = f_ums_strings;
 	fsg->function.descriptors = fs_function;
 	fsg->function.bind = fsg_function_bind;
 	fsg->function.unbind = fsg_function_unbind;

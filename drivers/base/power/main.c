@@ -30,6 +30,22 @@
 #include "../base.h"
 #include "power.h"
 
+// hsil
+#include "../../../arch/arm/mach-msm/smd_private.h"
+#include "../../../arch/arm/mach-msm/proc_comm.h"
+#include <mach/msm_iomap-7xxx.h>
+#include <mach/msm_iomap.h>
+#include <asm/io.h>
+#include <asm/io.h>
+
+#define RESUME_TIMEOUT	10000
+
+struct smem_info {
+        unsigned int info;
+};
+ 
+extern struct smem_info *smem_flag;
+
 /*
  * The entries in the dpm_list list are in a depth first order, simply
  * because children are guaranteed to be discovered after parents, and
@@ -481,9 +497,11 @@ static void dpm_drv_wdclr(struct device *dev)
  * Execute the appropriate "resume" callback for all devices whose status
  * indicates that they are suspended.
  */
+
 static void dpm_resume(pm_message_t state)
 {
 	struct list_head list;
+	int dpm_cnt = 0;
 
 	INIT_LIST_HEAD(&list);
 	mutex_lock(&dpm_list_mtx);
@@ -496,7 +514,7 @@ static void dpm_resume(pm_message_t state)
 
 			dev->power.status = DPM_RESUMING;
 			mutex_unlock(&dpm_list_mtx);
-
+			
 			error = device_resume(dev, state);
 
 			mutex_lock(&dpm_list_mtx);
@@ -509,6 +527,15 @@ static void dpm_resume(pm_message_t state)
 		if (!list_empty(&dev->power.entry))
 			list_move_tail(&dev->power.entry, &list);
 		put_device(dev);
+		// hsil
+		dpm_cnt++;
+		if (dpm_cnt > RESUME_TIMEOUT)
+		{
+			printk("%s: Timeout -> Will reset\n", __func__);
+	                smem_flag->info = 0xAEAEAEAE;
+		        msm_proc_comm_reset_modem_now();
+			break;
+		}
 	}
 	list_splice(&list, &dpm_list);
 	mutex_unlock(&dpm_list_mtx);

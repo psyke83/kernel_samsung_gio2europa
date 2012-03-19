@@ -1337,6 +1337,11 @@ config SERIAL_MSM_CONSOLE
 	depends on SERIAL_MSM=y
 	select SERIAL_CORE_CONSOLE
 
+config HS_SERIAL_MSM_CONSOLE
+	bool "MSM high-speed serial console support"
+	depends on SERIAL_MSM=y
+	select SERIAL_CORE_CONSOLE
+
 config SERIAL_MSM_CLOCK_CONTROL
 	bool "Allow tty clients to make clock requests to msm uarts."
 	depends on SERIAL_MSM=y

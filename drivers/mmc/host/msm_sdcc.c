@@ -15,6 +15,7 @@
  *
  */
 
+#include <mach/gpio.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -89,6 +90,7 @@ static struct mmc_command dummy52cmd = {
 };
 
 #define VERBOSE_COMMAND_TIMEOUTS	0
+
 
 #if IRQ_DEBUG == 1
 static char *irq_status_bits[] = { "cmdcrcfail", "datcrcfail", "cmdtimeout",
@@ -296,7 +298,22 @@ msmsdcc_dma_complete_tlet(unsigned long data)
 		if (mrq->data->error && !(host->curr.got_dataend)) {
 			pr_info("%s: Worked around bug 1535304\n",
 			       mmc_hostname(host->mmc));
+
+#if 1 // START_LOG message 	
+		if(host->curr.cmd) 
+		{ 
+			pr_info("%s: error!!! cmd:%02d arg:%08x resp[0]:0x%08x cmd_err:0x%08x data_err:0x%08x MCI_STATUS:0x%08x\n", 
+			mmc_hostname(host->mmc), host->curr.cmd->opcode, host->curr.cmd->arg, host->curr.cmd->resp[0], host->curr.cmd->error, mrq->data->error, readl(host->base + MMCISTATUS)); 
+		} 
+		else 
+		{ 
+			pr_info("%s: error !!! data_err:0x%08x MCI_STATUS:0x%08x\n", 
+			mmc_hostname(host->mmc),mrq->data->error, readl(host->base + MMCISTATUS)); 
+		} 
+#endif //END_LOG message 				
 		}
+
+		
 		/*
 		 * If we've already gotten our DATAEND / DATABLKEND
 		 * for this request, then complete it through here.
@@ -713,7 +730,21 @@ msmsdcc_pio_irq(int irq, void *dev_id)
 
 		if (!(status & (MCI_TXFIFOHALFEMPTY | MCI_RXDATAAVLBL)))
 			break;
-
+		// [2010.05.05] fix null point exception by sg variable
+		if(host->pio.sg == NULL)
+		{
+			printk(KERN_ERR "[%s] work around. sg is null\n", __func__);
+			spin_unlock(&host->lock);	//ADD
+			return IRQ_HANDLED;
+		}
+		// [2010.6.29 : workaround for that if data is noting, but rxactive by bad sd card
+		if(!host->curr.data && (status & MCI_RXACTIVE))
+		{
+			writel(0, base + MMCIMASK1);
+			spin_unlock(&host->lock);
+			return IRQ_HANDLED;
+		}
+		// ]				
 		/* Map the current scatter buffer */
 		local_irq_save(flags);
 		buffer = kmap_atomic(sg_page(host->pio.sg),
@@ -783,6 +814,10 @@ msmsdcc_irq(int irq, void *dev_id)
 	u32			status;
 	int			ret = 0;
 	int			timer = 0;
+
+#if defined(CONFIG_MACH_BENI)	
+	static int         irq_c = 0;
+#endif
 
 	spin_lock(&host->lock);
 
@@ -855,13 +890,31 @@ msmsdcc_irq(int irq, void *dev_id)
 				pr_err("%s: Command CRC error\n",
 				       mmc_hostname(host->mmc));
 				cmd->error = -EILSEQ;
-			}
+				pr_err("%s: Command CRC error CMD information CMD:%2d ARG:0x%08x\n", mmc_hostname(host->mmc), cmd->opcode, cmd->arg);
 
+#if defined(CONFIG_MACH_BENI)	
+				irq_c = irq_c + 1;
+
+				if( irq_c == 100 )
+				{
+					irq_c = 0;
+					msmsdcc_reset_and_restore(host);
+				}
+#endif				
+			}
+			
+#if defined(CONFIG_MACH_BENI)	
+			else
+			{
+			   irq_c = 0;
+			}
+#endif				
 			if (!cmd->data || cmd->error) {
 				if (host->curr.data && host->dma.sg)
 					msm_dmov_stop_cmd(host->dma.channel,
 							  &host->dma.hdr, 0);
 				else if (host->curr.data) { /* Non DMA */
+					msmsdcc_reset_and_restore(host);
 					msmsdcc_stop_data(host);
 					timer |= msmsdcc_request_end(host,
 							cmd->mrq);
@@ -988,7 +1041,8 @@ msmsdcc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	WARN_ON(host->curr.mrq != NULL);
 
-        WARN_ON(host->pwr == 0);
+	if (!(mmc->bus_resume_flags & MMC_BUSRESUME_MANUAL_RESUME))
+		WARN_ON(host->pwr == 0);
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -1085,7 +1139,7 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		break;
 	}
 
-	if (ios->bus_mode == MMC_BUSMODE_OPENDRAIN)
+	if (ios->bus_mode == MMC_BUSMODE_OPENDRAIN && host->mmc->index != 0) 
 		pwr |= MCI_OD;
 
 	writel(clk, host->base + MMCICLOCK);
@@ -1273,10 +1327,30 @@ set_polling(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+/* ATHENV +++ */
+static ssize_t
+set_detect_change(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct mmc_host *mmc = dev_get_drvdata(dev);
+	struct msmsdcc_host *host = mmc_priv(mmc);
+	int value;
+	if (sscanf(buf, "%d", &value)==1 && value) {
+        mmc_detect_change(host->mmc, 0);
+    }
+	return count;
+}
+static DEVICE_ATTR(detect_change, S_IRUGO | S_IWUSR,
+		NULL, set_detect_change);
+/* ATHENV --- */
+
 static DEVICE_ATTR(polling, S_IRUGO | S_IWUSR,
 		show_polling, set_polling);
 static struct attribute *dev_attrs[] = {
 	&dev_attr_polling.attr,
+/* ATHENV +++ */
+    &dev_attr_detect_change.attr,
+/* ATHENV --- */
 	NULL,
 };
 static struct attribute_group dev_attr_grp = {
@@ -1310,7 +1384,11 @@ static void msmsdcc_late_resume(struct early_suspend *h)
 };
 #endif
 
+#if 0
 static int
+#else
+int
+#endif
 msmsdcc_probe(struct platform_device *pdev)
 {
 	struct mmc_platform_data *plat = pdev->dev.platform_data;
@@ -1669,11 +1747,16 @@ msmsdcc_suspend(struct platform_device *dev, pm_message_t state)
 	if (mmc) {
 		if (host->plat->status_irq)
 			disable_irq(host->plat->status_irq);
+#if 0 /* ATHENV +++ avoid this otherwise wakelock will prevent system suspend*/
 		host->sdcc_suspending = 1;
-
+#endif /* ATHENV --- */
 		if (!mmc->card || (host->plat->sdiowakeup_irq &&
 				mmc->card->type == MMC_TYPE_SDIO) ||
+#if 1 /* ATHENV +++ */
+                1)
+#else
 				mmc->card->type != MMC_TYPE_SDIO)
+#endif /* ATHENV --- */
 			rc = mmc_suspend_host(mmc, state);
 		if (!rc) {
 			writel(0, host->base + MMCIMASK0);
@@ -1734,7 +1817,11 @@ msmsdcc_resume(struct platform_device *dev)
 		spin_unlock_irqrestore(&host->lock, flags);
 		if (!mmc->card || (host->plat->sdiowakeup_irq &&
 				mmc->card->type == MMC_TYPE_SDIO) ||
+#if 1 /* ATHENV +++ */
+                1)
+#else
 				mmc->card->type != MMC_TYPE_SDIO)
+#endif /* ATHENV --- */
 			mmc_resume_host(mmc);
 		if (host->plat->status_irq)
 			enable_irq(host->plat->status_irq);
