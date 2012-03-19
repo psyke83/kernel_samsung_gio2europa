@@ -10,12 +10,12 @@
  * All Rights Reserved
  */
 
-
 /*! \file BMA023_driver.c
     \brief This file contains all function implementations for the BMA023 in linux
     
     Details.
 */
+
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -36,33 +36,29 @@
 #include <mach/gpio.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
-#include <linux/i2c-algo-bit.h>
-#include <linux/wakelock.h>
-#include <linux/input.h>
 
-#include <linux/i2c/bma222.h>
+#include <linux/i2c/bma220.h>
 #include <linux/i2c/bma023_dev.h>
 
-//#define DEBUG 1
-#define CAL 1
-
-//#define BMA_DEBUG
+//#define DEBUG 1	
+#define BMA_DEBUG
 
 #define ACC_DEV_MAJOR 241
-#define BMA222_RETRY_COUNT	3
 
-extern int board_hw_revision;
-bma222_t * g_bma222;
+
+/* i2c operation for bma API */
+static char bma220_i2c_write(unsigned char sla, unsigned char reg_addr, unsigned char *data, unsigned char len);
+static char bma220_i2c_read(unsigned char sla, unsigned char reg_addr, unsigned char *data, unsigned char len);
+static void bma220_i2c_delay(unsigned int msec);
+
+static char i2c_acc_bma023_read(u8 reg, u8 *val, unsigned int len );
+static char i2c_acc_bma023_write( u8 reg, u8 *val );
 
 enum BMA_SENSORS  
 {
-	BMA222 = 0,
+	BMA220 = 0,
 	BMA023,
 };
-
-
-#define	ACC_ENABLED 1
-
 
 /* globe variant */
 static struct i2c_client *bma_client = NULL;
@@ -70,133 +66,72 @@ static char			sensor_type = -1;
 struct class *acc_class;
 static int 			calibration = 0 ;
 struct bma_data {
-	struct work_struct work_acc;
-	struct hrtimer timer;
-	ktime_t acc_poll_delay;
-	u8 state;
-	struct mutex power_lock;
-	struct workqueue_struct *wq;
-
 	union{
-		bma222_t			bma222;
+		bma220_t			bma220;
 		bma023_t			bma023;
 	};
 };
 
-// this proc file system's path is "/proc/driver/bma020"
-// usage :	(at the path) type "cat bma020" , it will show short information for current accelation
-// 			use it for simple working test only
-
-//#define BMA222_PROC_FS
-
-#ifdef BMA222_PROC_FS
-
-#include <linux/proc_fs.h>
-
-#define DRIVER_PROC_ENTRY		"driver/bma222"
-static void bma_acc_enable(void);
-
-static int bma222_proc_read(char *page, char **start, off_t off, int count, int *eof, void *data)
-{
-	char *p = page;
-	int len = 0;
-	
-	mutex_lock(&g_bma222->power_lock);
-	printk("bma222_proc_read\n");
-
-	g_bma222->state |= ACC_ENABLED;
-	bma_acc_enable();
-
-	mutex_unlock(&g_bma222->power_lock);
-
-	len = (p - page) - off;
-	if (len < 0) {
-		len = 0;
-	}
-
-	printk("bma_proc_read: success full\n");
-
-	*eof = (len <= count) ? 1 : 0;
-	*start = page + off;
-	return len;
-}
-#endif	//BMA222_PROC_FS
-
+struct device *bma_dev_t;
+EXPORT_SYMBOL(bma_dev_t);
 /*************************************************************************/
 /*						BMA220 I2C_API						   */
 /*************************************************************************/
 /*	i2c delay routine for eeprom	*/
-static inline void bma222_i2c_delay(unsigned int msec)
+static inline void bma220_i2c_delay(unsigned int msec)
 {
 	mdelay(msec);
 }
 
-
 /*	i2c write routine for bma	*/
-static inline char bma222_i2c_write(unsigned char reg_addr, unsigned char *data, unsigned char len)
+static inline char bma220_i2c_write(unsigned char sla, unsigned char reg_addr, unsigned char *data, unsigned char len)
 {
-	uint8_t i;
-	unsigned char tmp[2];
-	tmp[0] = reg_addr;
-	tmp[1] = *data;
-	
-	struct i2c_msg msg[] = {
-		{
-			.addr	= bma_client->addr,
-			.flags	= 0,
-			.len	= 2,
-			.buf	= tmp,
-		}
-	};
-	
-	for (i = 0; i < BMA222_RETRY_COUNT; i++) {
-		if (i2c_transfer(bma_client->adapter, msg, 1) >= 0) {
-			break;
-		}
-		mdelay(10);
+	int dummy;
+	int i=0;
+	unsigned char addr;
+	if( bma_client == NULL )	/*	No global client pointer?	*/
+		return -1;
+	addr = reg_addr<<1;		/*bma220 i2c addr left shift*/
+	dummy = i2c_smbus_write_byte_data(bma_client, addr, data[0]);
+
+	while(i<len)
+	{
+		addr = reg_addr<<1;		/*bma220 i2c addr left shift*/
+		dummy = i2c_smbus_write_byte_data(bma_client, addr, data[0]);
+		reg_addr++;
+		data++;
+		i++;		
+		if(dummy<0)
+			return -1;	
 	}
 
-	if (i >= BMA222_RETRY_COUNT) {
-		pr_err("%s: retry over %d\n", __FUNCTION__, BMA222_RETRY_COUNT);
-		return -EIO;
-	}
 	return 0;
 }
 
 /*	i2c read routine for bma220	*/
-static inline char bma222_i2c_read(unsigned char reg_addr, unsigned char *data, unsigned char len) 
+static inline char bma220_i2c_read(unsigned char sla, unsigned char reg_addr, unsigned char *data, unsigned char len) 
 {
-	uint8_t i;
-
-	struct i2c_msg msgs[] = {
-		{
-			.addr	= bma_client->addr,
-			.flags	= 0,
-			.len	= 1,
-			.buf	= &reg_addr,
-		},
-		{
-			.addr	= bma_client->addr,
-			.flags	= I2C_M_RD,
-			.len	= len,
-			.buf	= data,
-		}
-	};
-	
-	for (i = 0; i < BMA222_RETRY_COUNT; i++) {
-		if (i2c_transfer(bma_client->adapter, msgs, 2) >= 0) {
-			break;
-		}
-		mdelay(10);
+	int dummy=0;
+	int i=0;
+	unsigned char addr;
+	if( bma_client == NULL )	/*	No global client pointer?	*/
+		return -1;
+	while(i<len)
+	{        
+		addr = reg_addr<<1;	/*bma220 i2c addr left shift*/
+		dummy = i2c_smbus_read_word_data(bma_client, addr);
+		data[i] = dummy & 0x00ff;
+		i++;
+		reg_addr++;
+		dummy = len;
 	}
-
-	if (i >= BMA222_RETRY_COUNT) {
-		pr_err("%s: retry over %d\n", __FUNCTION__, BMA222_RETRY_COUNT);
-		return -EIO;
-	}
-	return 0;	
+	return 0;
 }
 
+/*************************************************************************/
+/*						BMA023 I2C_API						   */
+/*************************************************************************/
+#define I2C_M_WR				0x00
 
 static char i2c_acc_bma023_read(u8 reg, u8 *val, unsigned int len )
 {
@@ -316,11 +251,20 @@ static char i2c_acc_bma023_write( u8 reg, u8 *val )
 static ssize_t bma_fs_read(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	int count = 0;
-	bma222acc_t acc;
-	bma222_read_accel_xyz(&acc);
-
-       // printk("x: %d,y: %d,z: %d\n", acc.x, acc.y, acc.z);
-	count = sprintf(buf,"%d,%d,%d\n", acc.x, acc.y, acc.z );
+	unsigned char data[6] = {0,0,0,0,0,0};	
+	
+	if(sensor_type == BMA220)
+	{
+		bma220_read_accel_xyz((bma220acc_t*)data);
+		//printk("x: %d,y: %d,z: %d\n", ((bma220acc_t*)data)->x, ((bma220acc_t*)data)->y, ((bma220acc_t*)data)->z);
+		count = sprintf(buf,"%d,%d,%d\n", ((bma220acc_t*)data)->x, ((bma220acc_t*)data)->y, ((bma220acc_t*)data)->z );
+	}
+	else if(sensor_type == BMA023)
+	{
+		bma023_read_accel_xyz((bma023acc_t*)data);	
+		//printk("x: %d,y: %d,z: %d\n", ((bma023acc_t*)data)->x, ((bma023acc_t*)data)->y, ((bma023acc_t*)data)->z);
+		count = sprintf(buf,"%d,%d,%d\n", ((bma023acc_t*)data)->x, ((bma023acc_t*)data)->y, ((bma023acc_t*)data)->z );
+	}    
 
 	return count;
 }
@@ -337,10 +281,9 @@ static DEVICE_ATTR(acc_file, S_IRUGO | S_IWUSR | S_IWOTH | S_IXOTH, bma_fs_read,
 
 
 /*	read command for BMA device file	*/
-static ssize_t bma_read(struct file *file, char __user *buf, size_t count, 
-loff_t *offset)
+static ssize_t bma_read(struct file *file, char __user *buf, size_t count, loff_t *offset)
 {	
-	bma222acc_t acc;	
+	bma220acc_t acc;	
 	int ret;
 	if( bma_client == NULL )
 	{
@@ -350,7 +293,7 @@ loff_t *offset)
 		return -1;
 	}
 
-	bma222_read_accel_xyz(&acc);
+	bma220_read_accel_xyz(&acc);
 //#ifdef BMA_DEBUG
 	printk(KERN_INFO "BMA Accel: X/Y/Z axis: %-8d %-8d %-8d\n" ,
 		(int)acc.x, (int)acc.y, (int)acc.z);  
@@ -412,139 +355,21 @@ static int bma_close(struct inode *inode, struct file *file)
 }
 
 
-#if CAL
-//static int bma222_fast_calibration(signed char *data);	
-/******************************************************************************
-*
- * Description: *//**\brief  This API start the fast inline calibration and 
-store
- *              offset value into EEPROM
- *
- *
- *  \param       signed char data[0]  --> x axis target offset  
- *                           data[1]  --> y axis target offset
- *                           data[2]  --> z axis target offset
- *                  00b ------ 0g
- *                  01b ------ 1g
- *                  10b ------ -1g
- *                  11b ------ 0g
- * 
-******************************************************************************/
-static int bma222_fast_calibration(signed char *data)
-{
-    signed char tmp;
-#ifdef DEBUG
-	printk(KERN_INFO "%s\n",__FUNCTION__);
-    printk(KERN_INFO "data are %d,%d,%d\n",data[0],data[1],data[2]);
-    printk(KERN_INFO "start x axis fast calibration\n");
-#endif
-    bma222_set_offset_target_x(data[0]);
-    //bma222_get_offset_target_x(&tmp);
-    //printk(KERN_INFO "x offset is %d\n",tmp);
-    //bma222_get_offset_filt_x(&tmp);
-    //printk(KERN_INFO "x offset filt is %d\n",tmp);
-    tmp=1;//selet x axis in cal_trigger
-    bma222_set_cal_trigger(tmp);
-    do
-    {
-        mdelay(2);
-        bma222_get_cal_ready(&tmp);
-#ifdef DEBUG
-        printk(KERN_INFO "wait 2ms and got cal ready flag is %d\n",tmp);
-#endif  
-    }while(tmp==0);
-	
-#ifdef DEBUG
-    bma222_get_offset_filt_x(&tmp);
-    printk(KERN_INFO "x offset filt is %d\n",tmp);
-    printk(KERN_INFO "x axis fast calibration finished\n");
-    printk(KERN_INFO "start y axis fast calibration\n");
-#endif
-
-    bma222_set_offset_target_y(data[1]);
-    //bma222_get_offset_target_y(&tmp);
-    //printk(KERN_INFO "y offset is %d\n",tmp);
-    //bma222_get_offset_filt_y(&tmp);
-    //printk(KERN_INFO "y offset filt is %d\n",tmp);
-    tmp=2;//selet y axis in cal_trigger
-    bma222_set_cal_trigger(tmp);
-    do
-    {
-        mdelay(2); 
-        bma222_get_cal_ready(&tmp);
-#ifdef DEBUG
-        printk(KERN_INFO "wait 2ms and got cal ready flag is %d\n",tmp);
-#endif  
-    }while(tmp==0);
-	
-#ifdef DEBUG
-    bma222_get_offset_filt_y(&tmp);
-    printk(KERN_INFO "y offset filt is %d\n",tmp);
-    printk(KERN_INFO "y axis fast calibration finished\n");
-    printk(KERN_INFO "start z axis fast calibration\n");
-#endif
-    bma222_set_offset_target_z(data[2]);
-
-    //bma222_get_offset_target_z(&tmp);
-    //printk(KERN_INFO "z offset is %d\n",tmp);
-    //bma222_get_offset_filt_z(&tmp);
-    //printk(KERN_INFO "z offset filt is %d\n",tmp);
-    tmp=3;//selet z axis in cal_trigger
-    bma222_set_cal_trigger(tmp);
-    do
-    {
-        mdelay(2); 
-        bma222_get_cal_ready(&tmp);
-#ifdef DEBUG
-        printk(KERN_INFO "wait 2ms and got cal ready flag is %d\n",tmp);
-#endif  
-    }while(tmp==0);
-	
-#ifdef DEBUG
-    bma222_get_offset_filt_z(&tmp);
-    printk(KERN_INFO "z offset filt is %d\n",tmp);
-    printk(KERN_INFO "z axis fast calibration finished\n");
-    printk(KERN_INFO "store xyz offset to eeprom\n");
-#endif
-    tmp=1;//unlock eeprom
-    bma222_set_ee_w(tmp);
-    bma222_set_ee_prog_trig();//update eeprom
-    do
-    {
-        mdelay(2); 
-        bma222_get_eeprom_writing_status(&tmp);
-#ifdef DEBUG
-        printk(KERN_INFO "wait 2ms and got eeprom writing status is %d\n",tmp);
-#endif  
-    }while(tmp==0);
-	
-    tmp=0;//lock eemprom
-    bma222_set_ee_w(tmp);
-#ifdef DEBUG
-    printk(KERN_INFO "eeprom writing is finished\n");
-#endif  
-    return 0;
-}
-#endif
-
-
 /*	ioctl command for BMA accel device file	*/
 static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int err = 0;
 	unsigned char data[6];
-	unsigned char data_cal[3];
-	bma222acc_t acc;
 
 	/* check cmd */
-	if(_IOC_TYPE(cmd) != BMA222_IOC_MAGIC)	
+	if(_IOC_TYPE(cmd) != BMA220_IOC_MAGIC)	
 	{
 #ifdef BMA_DEBUG
 		printk("cmd magic type error\n");
 #endif
 		return -ENOTTY;
 	}
-	if(_IOC_NR(cmd) > BMA222_IOC_MAXNR)
+	if(_IOC_NR(cmd) > BMA220_IOC_MAXNR)
 	{
 #ifdef BMA_DEBUG
 		printk("cmd number error\n");
@@ -577,12 +402,15 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 
 	switch(cmd)
 	{
-	case BMA222_SOFT_RESET:
-		err = bma222_soft_reset();
+	case BMA220_SOFT_RESET:
+		err = bma220_soft_reset();
 		return err;
 
+	case BMA220_SET_SUSPEND:
+		err = bma220_set_suspend();
+		return err;
 
-	case BMA222_SET_RANGE:
+	case BMA220_SET_OFFSET_TARGET_X:
 		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -590,11 +418,44 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 #endif
 			return -EFAULT;
 		}
-		err = bma222_set_range(*data);
+		err = bma220_set_offset_target_x(*data);
 		return err;
 
-	case BMA222_GET_RANGE:
-		err = bma222_get_range(data);
+	case BMA220_SET_OFFSET_TARGET_Y:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_offset_target_y(*data);
+		return err;
+
+	case BMA220_SET_OFFSET_TARGET_Z:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_offset_target_z(*data);
+		return err;
+
+	case BMA220_SET_RANGE:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_range(*data);
+		return err;
+
+	case BMA220_GET_RANGE:
+		err = bma220_get_range(data);
 		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -604,7 +465,7 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-	case BMA222_SET_MODE:  // for suspend
+	case BMA220_SET_MODE:
 		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -612,11 +473,11 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 #endif
 			return -EFAULT;
 		}
-		err = bma222_set_mode(*data);
+		err = bma220_set_mode(*data);
 		return err;
 
-	case BMA222_GET_MODE:
-		err = bma222_get_mode(data);
+	case BMA220_GET_MODE:
+		err = bma220_get_mode(data);
 		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -626,7 +487,7 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-	case BMA222_SET_BANDWIDTH:
+	case BMA220_SET_BANDWIDTH:
 		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -634,11 +495,11 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 #endif
 			return -EFAULT;
 		}
-		err = bma222_set_bandwidth(*data);
+		err = bma220_set_bandwidth(*data);
 		return err;
 
-	case BMA222_GET_BANDWIDTH:
-		err = bma222_get_bandwidth(data);
+	case BMA220_GET_BANDWIDTH:
+		err = bma220_get_bandwidth(data);
 		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
 #ifdef BMA_DEBUG
@@ -648,13 +509,57 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-	case BMA222_RESET_INTERRUPT:
-		err = bma222_reset_interrupt();
+	case BMA220_SET_LOW_TH:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_low_th(*data);
 		return err;
 
-	case BMA222_READ_ACCEL_X:
-		err = bma222_read_accel_x((short*)data);
-		if(copy_to_user((signed char*)arg,(short*)data,1*sizeof(short))!=0)
+	case BMA220_SET_LOW_DUR:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_low_dur(*data);
+		return err;
+
+	case BMA220_SET_HIGH_TH:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_high_th(*data);
+		return err;
+
+	case BMA220_SET_HIGH_DUR:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_high_dur(*data);
+		return err;
+
+	case BMA220_RESET_INTERRUPT:
+		err = bma220_reset_int();
+		return err;
+
+	case BMA220_READ_ACCEL_X:
+		err = bma220_read_accel_x((signed char*)data);
+		if(copy_to_user((signed char*)arg,(signed char*)data,1)!=0)
 		{
 #ifdef BMA_DEBUG
 			printk("copy_to_user error\n");
@@ -663,9 +568,9 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-	case BMA222_READ_ACCEL_Y:
-		err = bma222_read_accel_y((short*)data);
-		if(copy_to_user((signed char*)arg,(short*)data,1*sizeof(short))!=0)
+	case BMA220_READ_ACCEL_Y:
+		err = bma220_read_accel_y((signed char*)data);
+		if(copy_to_user((signed char*)arg,(signed char*)data,1)!=0)
 		{
 #ifdef BMA_DEBUG
 			printk("copy_to_user error\n");
@@ -674,9 +579,9 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-	case BMA222_READ_ACCEL_Z:
-		err = bma222_read_accel_z((short*)data);
-		if(copy_to_user((signed char*)arg,(short*)data,1*sizeof(short))!=0)
+	case BMA220_READ_ACCEL_Z:
+		err = bma220_read_accel_z((signed char*)data);
+		if(copy_to_user((signed char*)arg,(signed char*)data,1)!=0)
 		{
 #ifdef BMA_DEBUG
 			printk("copy_to_user error\n");
@@ -684,11 +589,67 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 			return -EFAULT;
 		}
 		return err;
-	case BMA222_READ_ACCEL_XYZ:
-		if(sensor_type == BMA222)
+
+	case BMA220_SET_EN_LOW:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
 		{
-			err = bma222_read_accel_xyz((bma222acc_t*)data);
-			if(copy_to_user((bma222acc_t*)arg,(bma222acc_t*)data,3*sizeof(short))!=0)
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_low(*data);
+		return err;
+
+	case BMA220_SET_EN_HIGH_XYZ:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_high_xyz(*data);
+		return err;
+
+	case BMA220_SET_LATCH_INT:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_latch_int(*data);
+		return err;
+
+	case BMA220_SET_LOW_HY:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_low_hy(*data);
+		return err;
+
+	case BMA220_SET_HIGH_HY:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_high_hy(*data);
+		return err;
+
+	case BMA220_READ_ACCEL_XYZ:
+		if(sensor_type == BMA220)
+		{
+			err = bma220_read_accel_xyz((bma220acc_t*)data);
+			if(copy_to_user((bma220acc_t*)arg,(bma220acc_t*)data,3)!=0)
 			{
 #ifdef BMA_DEBUG
 				printk("copy_to error\n");
@@ -710,9 +671,296 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		
 		return err;
 
-	case BMA222_GET_SENSOR_TYPE:		
-		printk("[%s] Get Sensor Type = %d\n", __func__, sensor_type);
-		if(copy_to_user((char*)arg,&sensor_type,1)!=0)
+    case BMA220_GET_OFFSET_XYZ:
+		err = bma220_get_offset_xyz((bma220acc_t*)data);
+		if(copy_to_user((bma220acc_t*)arg,(bma220acc_t*)data,3)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_SET_OFFSET_XYZ:
+		if(copy_from_user((bma220acc_t*)data,(bma220acc_t*)arg,3)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+        err = bma220_set_offset_xyz(*(bma220acc_t *)data);
+		return err;
+
+	
+	case BMA220_SET_SLEEP_EN:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_sleep_en(*data);
+		return err;
+
+	case BMA220_SET_SC_FILT_CONFIG:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_sc_filt_config(*data);
+		return err;
+
+	case BMA220_SET_SERIAL_HIGH_BW:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_serial_high_bw(*data);
+		return err;
+
+	case BMA220_SET_EN_ORIENT:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_orient(*data);
+		return err;
+
+	case BMA220_SET_ORIENT_EX:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_orient_ex(*data);
+		return err;
+
+	case BMA220_SET_ORIENT_BLOCKING:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_orient_blocking(*data);
+		return err;
+
+	case BMA220_SET_EN_TT_XYZ:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_tt_xyz(*data);
+		return err;
+
+	case BMA220_SET_TT_TH:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_tt_th(*data);
+		return err;
+
+	case BMA220_SET_TT_DUR:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_tt_dur(*data);
+		return err;
+
+	case BMA220_SET_TT_FILT:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_tt_filt(*data);
+		return err;
+
+	case BMA220_SET_EN_SLOPE_XYZ:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_slope_xyz(*data);
+		return err;
+
+	case BMA220_SET_EN_DATA:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_en_data(*data);
+		return err;
+
+	case BMA220_SET_SLOPE_TH:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_slope_th(*data);
+		return err;
+
+	case BMA220_SET_SLOPE_DUR:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_slope_dur(*data);
+		return err;
+
+	case BMA220_SET_SLOPE_FILT:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_slope_filt(*data);
+		return err;
+
+	case BMA220_SET_CAL_TRIGGER:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_cal_trigger(*data);
+		return err;
+
+	case BMA220_SET_HP_XYZ_EN:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_hp_xyz_en(*data);
+		return err;
+
+	case BMA220_SET_SLEEP_DUR:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_sleep_dur(*data);
+		return err;
+
+	case BMA220_SET_OFFSET_RESET:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_offset_reset(*data);
+		return err;
+
+	case BMA220_SET_CUT_OFF_SPEED:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_cut_off_speed(*data);
+		return err;
+
+	case BMA220_SET_CAL_MANUAL:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+    	err = bma220_set_cal_manual(*data);
+		return err;
+
+	case BMA220_SET_SBIST:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_sbist(*data);
+		return err;
+
+	case BMA220_SET_INTERRUPT_REGISTER:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_interrupt_register(*data);
+		return err;
+
+	case BMA220_SET_DIRECTION_INTERRUPT_REGISTER:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_direction_interrupt_register(*data);
+		return err;
+	
+	case BMA220_GET_DIRECTION_STATUS_REGISTER:
+		err = bma220_get_direction_status_register(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
 #ifdef BMA_DEBUG
 			printk("copy_to_user error\n");
@@ -721,35 +969,455 @@ static int bma_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		}
 		return err;
 
-      case BMA222_GET_HWREV:
-  		// printk("[%s] Get HW REV = %d\n", __func__, board_hw_revision);
-		if(copy_to_user((int*)arg,&board_hw_revision,1)!=0)
+	case BMA220_GET_INTERRUPT_STATUS_REGISTER:
+		err = bma220_get_interrupt_status_register(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
 #ifdef BMA_DEBUG
 			printk("copy_to_user error\n");
 #endif
 			return -EFAULT;
 		}
-		return err;         
-			
-	case BMA222_CALIBRATION:		
-		bma222_read_accel_xyz(&acc);
-		printk("[BMA222] + IOCTL BMA222_CALIBRATION X: %d Y: %d Z: %d \n",acc.x, acc.y, acc.z);
+		return err;
 
-		if(copy_from_user(data_cal,(unsigned char*)arg,3)!=0)
+	case BMA220_GET_ORIENTATION:
+		err = bma220_get_orientation(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
 		{
-#ifdef DEBUG
-			printk(KERN_INFO "copy_from_user error\n");
-#endif			
-			return -EFAULT;		
-		}	
-		printk("[BMA222] IOCTL BMA222_CALIBRATION data0: %d data1: %d data2: %d \n",data_cal[0], data_cal[1], data_cal[2]);
-#if CAL
-		err = bma222_fast_calibration(data_cal);
-#endif					
-		bma222_read_accel_xyz(&acc);
-			
-		printk("[BMA222] - IOCTL BMA222_CALIBRATION X: %d Y: %d Z: %d \n",acc.x, acc.y, acc.z);
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+	case BMA220_GET_ORIENT_INT:
+		err = bma220_get_orient_int(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_CHIP_ID:
+		err = bma220_get_chip_id(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SC_FILT_CONFIG:
+		err = bma220_get_sc_filt_config(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SLEEP_EN:
+		err = bma220_get_sleep_en(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SERIAL_HIGH_BW:
+		err = bma220_get_serial_high_bw(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_LATCH_INT:
+		err = bma220_get_latch_int(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_DATA:
+		err = bma220_get_en_data(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_HIGH_XYZ:
+		err = bma220_get_en_high_xyz(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_HIGH_TH:
+		err = bma220_get_high_th(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_HIGH_HY:
+		err = bma220_get_high_hy(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_HIGH_DUR:
+		err = bma220_get_high_g_dur(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_LOW:
+		err = bma220_get_en_low(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_LOW_TH:
+		err = bma220_get_low_th(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_LOW_HY:
+		err = bma220_get_low_hy(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_LOW_DUR:
+		err = bma220_get_low_g_dur(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_ORIENT:
+		err = bma220_get_en_orient(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_ORIENT_EX:
+		err = bma220_get_orient_ex(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_ORIENT_BLOCKING:
+		err = bma220_get_orient_blocking(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_TT_XYZ:
+		err = bma220_get_en_tt_xyz(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_TT_TH:
+		err = bma220_get_tt_th(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_TT_DUR:
+		err = bma220_get_tt_dur(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_TT_FILT:
+		err = bma220_get_tt_filt(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_SET_TT_SAMP:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_tt_samp(*data);
+		return err;
+
+    case BMA220_SET_TIP_EN:
+		if(copy_from_user(data,(unsigned char*)arg,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_from_user error\n");
+#endif
+			return -EFAULT;
+		}
+		err = bma220_set_tip_en(*data);
+		return err;
+
+    case BMA220_GET_TT_SAMP:
+		err = bma220_get_tt_samp(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_TIP_EN:
+		err = bma220_get_tip_en(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_EN_SLOPE_XYZ:
+		err = bma220_get_en_slope_xyz(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SLOPE_TH:
+		err = bma220_get_slope_th(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SLOPE_DUR:
+		err = bma220_get_slope_dur(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_SLOPE_FILT:
+		err = bma220_get_slope_filt(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_HP_XYZ_EN:
+		err = bma220_get_hp_xyz_en(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_OFFSET_TARGET_X:
+		err = bma220_get_offset_target_x(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_OFFSET_TARGET_Y:
+		err = bma220_get_offset_target_y(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_OFFSET_TARGET_Z:
+		err = bma220_get_offset_target_z(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_CUT_OFF_SPEED:
+		err = bma220_get_cut_off_speed(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+    case BMA220_GET_CAL_MANUAL:
+		err = bma220_get_cal_manual(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+	case BMA220_GET_CAL_RDY:
+		err = bma220_get_cal_rdy(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+	case BMA220_GET_SLEEP_DUR:
+		err = bma220_get_sleep_dur(data);
+		if(copy_to_user((unsigned char*)arg,data,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
+		return err;
+
+	case BMA220_GET_SENSOR_TYPE:		
+		printk("[%s] Get Sensor Type = %d\n", __func__, sensor_type);
+		if(copy_to_user((char*)arg,&sensor_type,1)!=0)
+		{
+#ifdef BMA_DEBUG
+			printk("copy_to_user error\n");
+#endif
+			return -EFAULT;
+		}
 		return err;
 
 	default:
@@ -787,143 +1455,12 @@ static int bma_detect(struct i2c_client *client, int kind,
 	return 0;
 }
 
-
-
-static void I2c_udelaySet(void)
-{
-	struct i2c_algo_bit_data *adap = bma_client->adapter->algo_data;
-	adap->udelay = 1;
-}
-
-static void bma_acc_enable(void)
-{
-	printk("starting poll timer, delay %lldns\n", ktime_to_ns(g_bma222->acc_poll_delay));
-	hrtimer_start(&g_bma222->timer, g_bma222->acc_poll_delay, HRTIMER_MODE_REL);
-}
-
-static void bma_acc_disable(void)
-{
-	printk("cancelling poll timer\n");
-	hrtimer_cancel(&g_bma222->timer);
-	cancel_work_sync(&g_bma222->work_acc);
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-
-static ssize_t poll_delay_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%lld\n", ktime_to_ns(g_bma222->acc_poll_delay));
-}
-
-
-static ssize_t poll_delay_store(struct device *dev,struct device_attribute *attr, const char *buf, size_t size)
-{
-	int64_t new_delay;
-	int err;
-
-	err = strict_strtoll(buf, 10, &new_delay);
-	if (err < 0)
-		return err;
-
-	printk("new delay = %lldns, old delay = %lldns\n",
-		    new_delay, ktime_to_ns(g_bma222->acc_poll_delay));
-	mutex_lock(&g_bma222->power_lock);
-	if (new_delay != ktime_to_ns(g_bma222->acc_poll_delay)) {
-		bma_acc_disable();
-		g_bma222->acc_poll_delay = ns_to_ktime(new_delay);
-		if (g_bma222->state & ACC_ENABLED) {
-			bma_acc_enable();
-		}
-	}
-	mutex_unlock(&g_bma222->power_lock);
-
-	return size;
-}
-
-static ssize_t acc_enable_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", (g_bma222->state & ACC_ENABLED) ? 1 : 0);
-}
-
-
-static ssize_t acc_enable_store(struct device *dev,struct device_attribute *attr, const char *buf, size_t size)
-{
-	bool new_value;
-
-	if (sysfs_streq(buf, "1"))
-		new_value = true;
-	else if (sysfs_streq(buf, "0"))
-		new_value = false;
-	else {
-		pr_err("%s: invalid value %d\n", __func__, *buf);
-		return -EINVAL;
-	}
-
-	mutex_lock(&g_bma222->power_lock);
-	printk("new_value = %d, old state = %d\n", new_value, (g_bma222->state & ACC_ENABLED) ? 1 : 0);
-	if (new_value && !(g_bma222->state & ACC_ENABLED)) {
-		g_bma222->state |= ACC_ENABLED;
-		bma_acc_enable();
-	} else if (!new_value && (g_bma222->state & ACC_ENABLED)) {
-		bma_acc_disable();
-		g_bma222->state = 0;
-	}
-	mutex_unlock(&g_bma222->power_lock);
-	return size;
-}
-
-static DEVICE_ATTR(poll_delay, S_IRUGO | S_IWUSR | S_IWGRP,
-		   poll_delay_show, poll_delay_store);
-
-static struct device_attribute dev_attr_acc_enable =
-	__ATTR(enable, S_IRUGO | S_IWUSR | S_IWGRP,
-	       acc_enable_show, acc_enable_store);
-
-static struct attribute *acc_sysfs_attrs[] = {
-	&dev_attr_acc_enable.attr,
-	&dev_attr_poll_delay.attr,
-	NULL
-};
-
-static struct attribute_group acc_attribute_group = {
-	.attrs = acc_sysfs_attrs,
-};
-///////////////////////////////////////////////////////////////////////////////////
-
-static void bma_work_func_acc(struct work_struct *work)
-{
-	bma222acc_t acc;
-	int err;
-		
-	err = bma222_read_accel_xyz(&acc);
-	
-//	printk("##### %d,  %d,  %d\n", acc.x, acc.y, acc.z );
-
-	input_report_rel(g_bma222->acc_input_dev, REL_X, acc.x);
-	input_report_rel(g_bma222->acc_input_dev, REL_Y, acc.y);
-	input_report_rel(g_bma222->acc_input_dev, REL_Z, acc.z);
-	input_sync(g_bma222->acc_input_dev);
-}
-
-/* This function is for light sensor.  It operates every a few seconds.
- * It asks for work to be done on a thread because i2c needs a thread
- * context (slow and blocking) and then reschedules the timer to run again.
- */
-static enum hrtimer_restart bma_timer_func(struct hrtimer *timer)
-{
-	queue_work(g_bma222->wq, &g_bma222->work_acc);
-	hrtimer_forward_now(&g_bma222->timer, g_bma222->acc_poll_delay);
-	return HRTIMER_RESTART;
-}
-
 static int bma_probe(struct i2c_client *client,
 			 const struct i2c_device_id *id)
 {
 	int err = 0;
 	int tempvalue;
-	struct input_dev *input_dev;
 	struct bma_data *data;
-      int bma222_i2c_slave_addr = client->addr; // [HSS] Support both address ( 0X18(old) and 0X08(new) ) (2010.09.29)
 #ifdef BMA_DEBUG
 	printk(KERN_INFO "%s\n",__FUNCTION__);
 #endif
@@ -942,19 +1479,9 @@ static int bma_probe(struct i2c_client *client,
 	printk("[%s] slave addr = %x\n", __func__, client->addr);
 	
 	/* read chip id */
-	tempvalue = 0;			
+	tempvalue = 0;
 #if 1//BMA220_SMBUS
 	tempvalue = i2c_smbus_read_word_data(client, 0x00);
-	// [HSS] Support both address ( 0X18(old) and 0X08(new) ) (2010.09.29)
-      if( tempvalue <0)
-      {
-         if(bma222_i2c_slave_addr == BMA222_I2C_ADDR)
-         {
-            client->addr =  bma222_i2c_slave_addr = BMA222_I2C_ADDR_ENG;
-            printk(KERN_INFO "[HSS][%s] Slave Address is not matched, so, it will retry i2c transfer with changed slave address!\n", __func__);
-		    tempvalue = i2c_smbus_read_word_data(client, 0x00);
-         }
-      }
 #else
 	i2c_master_send(client, (char*)&tempvalue, 1);
 	i2c_master_recv(client, (char*)&tempvalue, 1);
@@ -967,18 +1494,16 @@ static int bma_probe(struct i2c_client *client,
 	}
 	else
 	{
-	// [HSS] Support both address ( 0X18(old) and 0X08(new) ) (2010.09.29)
-		//client->addr = BMA222_I2C_ADDR;
-		client->addr = bma222_i2c_slave_addr;
+		client->addr = BMA220_I2C_ADDR;
 		tempvalue = 0;
 
 		tempvalue = i2c_smbus_read_word_data(client, 0x00);
-		if((tempvalue&0x00FF) == 0x0003) // BMA220 : 0xdd, BMA222 : 0x03
+ 		
+		if((tempvalue&0x00FF) == 0x00dd)
 		{
 			printk(KERN_INFO "Bosch Sensortec Device detected!\nBMA220 registered I2C driver!\n");			
 			bma_client = client;
-			I2c_udelaySet();
-			sensor_type= BMA222;
+			sensor_type= BMA220;
 		}
 		else
 		{		
@@ -998,80 +1523,24 @@ static int bma_probe(struct i2c_client *client,
 	}
 	printk(KERN_INFO "bma accel device create ok\n");
 
-	g_bma222 = &data->bma222;
-//////////////////////////////////////////////////////////////////////////////
-	mutex_init(&g_bma222->power_lock);
-
-	/* hrtimer settings.  we poll for light values using a timer. */
-	hrtimer_init(&g_bma222->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	g_bma222->acc_poll_delay = ns_to_ktime(50 * NSEC_PER_MSEC);
-	g_bma222->timer.function = bma_timer_func;
-
-	/* the timer just fires off a work queue request.  we need a thread
-	   to read the i2c (can be slow and blocking). */
-	g_bma222->wq = create_singlethread_workqueue("bma_wq");
-	if (!g_bma222->wq) {
-		err = -ENOMEM;
-		printk("%s: could not create workqueue\n", __func__);
-		goto err_create_workqueue;
-	}
-	/* this is the thread function we run on the work queue */
-	INIT_WORK(&g_bma222->work_acc, bma_work_func_acc);
-
-///////////////////////////////////////////////////////////////////////////////////
-	/* allocate lightsensor-level input_device */
-	input_dev = input_allocate_device();
-	if (!input_dev) {
-		printk("%s: could not allocate input device\n", __func__);
-		err = -ENOMEM;
-		goto err_input_allocate_device_light;
-	}
-	input_set_drvdata(input_dev, g_bma222);
-	input_dev->name = "accel";
-
-
-	set_bit(EV_REL, input_dev->evbit);	
-	/* 32768 == 1g, range -4g ~ +4g */
-	/* acceleration x-axis */
-	input_set_capability(input_dev, EV_REL, REL_X);
-	input_set_abs_params(input_dev, REL_X, -256, 256, 0, 0);
-	/* acceleration y-axis */
-	input_set_capability(input_dev, EV_REL, REL_Y);
-	input_set_abs_params(input_dev, REL_Y, -256, 256, 0, 0);
-	/* acceleration z-axis */
-	input_set_capability(input_dev, EV_REL, REL_Z);
-	input_set_abs_params(input_dev, REL_Z, -256, 256, 0, 0);
-
-	printk("registering lightsensor-level input device\n");
-	err = input_register_device(input_dev);
-	if (err < 0) {
-		printk("%s: could not register input device\n", __func__);
-		input_free_device(input_dev);
-		goto err_input_register_device_light;
-	}
-	g_bma222->acc_input_dev = input_dev;
-
-
-	err = sysfs_create_group(&input_dev->dev.kobj,&acc_attribute_group);
-	if (err) {
-		printk("Creating bh1721 attribute group failed");
-		goto error_device;
-	}
-//////////////////////////////////////////////////////////////////////////////
-
-	if(sensor_type == BMA222)
+	if(sensor_type == BMA220)
 	{
 		/* bma220 sensor initial */
-		data->bma222.bus_write = bma222_i2c_write;
-		data->bma222.bus_read = bma222_i2c_read;
-		data->bma222.delay_msec = bma222_i2c_delay;	
+		data->bma220.bus_write = bma220_i2c_write;
+		data->bma220.bus_read = bma220_i2c_read;
+		data->bma220.delay_msec = bma220_i2c_delay;	
 
-	// [HSS] Support both address ( 0X18(old) and 0X08(new) ) (2010.09.29)
-		bma222_init(&(data->bma222), bma222_i2c_slave_addr);
-		bma222_set_bandwidth(4); //bandwidth 250Hz => lowest to reduce noise
-		bma222_set_range(0);	//range +/- 2G
+		bma220_init(&(data->bma220));
+		bma220_set_bandwidth(2); //bandwidth 250Hz
+		bma220_set_range(0);	//range +/- 2G
 
-
+		/* register interrupt */
+		bma220_set_en_tt_xyz(0);
+		bma220_set_en_slope_xyz(0);
+		bma220_set_en_high_xyz(0);
+		bma220_set_en_low(0);
+		bma220_set_en_orient(0);
+		bma220_reset_int();
 	}
 	else if(sensor_type == BMA023)
 	{
@@ -1094,24 +1563,11 @@ static int bma_probe(struct i2c_client *client,
 		bma023_set_bandwidth(bma023_BW_25HZ);
 	}
 
-#ifdef BMA222_PROC_FS
-	create_proc_read_entry(DRIVER_PROC_ENTRY, 0, 0, bma222_proc_read, NULL);
-#endif	//BMA222_PROC_FS
-
 	return 0;
 
 //	misc_deregister(&bma_device);
-
-error_device:
-	sysfs_remove_group(&client->dev.kobj, &acc_attribute_group);
-err_input_register_device_light:
-	input_unregister_device(g_bma222->acc_input_dev);
-err_input_allocate_device_light:	
 kfree_exit:
-	destroy_workqueue(g_bma222->wq);
 	kfree(data);
-err_create_workqueue:
-	mutex_destroy(&data->power_lock);
 exit:
 	return err;
 }
@@ -1120,18 +1576,6 @@ exit:
 static int bma_remove(struct i2c_client *client)
 {
 	struct bma_data *data = i2c_get_clientdata(client);
-
-	if (g_bma222->state & ACC_ENABLED)
-	{
-		g_bma222->state = 0;
-		bma_acc_disable();
-	}
-	sysfs_remove_group(&g_bma222->acc_input_dev->dev.kobj, &acc_attribute_group);
-	input_unregister_device(g_bma222->acc_input_dev);
-
-	destroy_workqueue(g_bma222->wq);
-	mutex_destroy(&g_bma222->power_lock);
-	
 #ifdef BMA_DEBUG
 	printk(KERN_INFO "%s\n",__FUNCTION__);
 #endif	
@@ -1139,17 +1583,18 @@ static int bma_remove(struct i2c_client *client)
 
 	//i2c_detach_client(client);
 	kfree(data);
-	g_bma222 = NULL;
+	bma_client = NULL;
 	return 0;
 }
 
+#ifdef CONFIG_PM
 static int bma_suspend(struct i2c_client *client, pm_message_t mesg)
 {
 	int ret = 0;;
 
-	if(sensor_type == BMA222)
+	if(sensor_type == BMA220)
 	{
-		if((ret = bma222_set_mode(2)) != 0)	// 2: suspend mode
+		if((ret = bma220_set_mode(2)) != 0)	// 2: suspend mode
 			printk(KERN_ERR "[%s] Change to Suspend Mode is failed\n",__FUNCTION__);
 		
 	}
@@ -1157,8 +1602,6 @@ static int bma_suspend(struct i2c_client *client, pm_message_t mesg)
 	{
 		bma023_set_operation_mode( ACCEL, STANDBY, calibration ) ;
 	}
-	if (g_bma222->state & ACC_ENABLED) 
-		bma_acc_disable();
 
 #ifdef BMA_DEBUG
 	printk(KERN_INFO "[%s] bma220 !!suspend mode!!\n",__FUNCTION__);
@@ -1171,9 +1614,9 @@ static int bma_resume(struct i2c_client *client)
 {
 	int ret = 0;
 
-	if(sensor_type == BMA222)
+	if(sensor_type == BMA220)
 	{
-		if((ret = bma222_set_mode(0)) != 0)	// Normal mode
+		if((ret = bma220_set_mode(0)) != 0)	// Normal mode
 			printk(KERN_ERR "[%s] Change to Normal Mode is failed\n",__FUNCTION__);
 	}
 	else if(sensor_type == BMA023)
@@ -1181,15 +1624,16 @@ static int bma_resume(struct i2c_client *client)
 		bma023_set_operation_mode( ACCEL, ONLYACCEL, calibration ) ;
 	}
 
-	if (g_bma222->state & ACC_ENABLED)
-		bma_acc_enable();
-
 #ifdef BMA_DEBUG
 	printk(KERN_INFO "[%s] bma220 !!resume mode!!\n",__FUNCTION__);
 #endif
 
 	return 0;
 }
+#else
+#define bma_suspend NULL
+#define bma_resume NULL
+#endif
 
 static unsigned short normal_i2c[] = { I2C_CLIENT_END};
 I2C_CLIENT_INSMOD_1(bma_accel);
@@ -1206,37 +1650,37 @@ static struct i2c_driver bma_accel_driver = {
 		.owner	= THIS_MODULE,	
 		.name	= "bma_accel",
 	},
-	//.class		= I2C_CLASS_HWMON,
+	.class		= I2C_CLASS_HWMON,
 	.id_table		= bma_id,
 	.address_data	= &addr_data,
 	.probe		= bma_probe,
 	.remove		= bma_remove,
 	.detect		= bma_detect,
-	.suspend	= bma_suspend,
+	.suspend		= bma_suspend,
 	.resume		= bma_resume,
 };
 
 static int __init BMA_init(void)
 {
-	struct device *dev_t;
 
 #ifdef BMA_DEBUG
 	printk(KERN_INFO "%s\n",__FUNCTION__);
 #endif
+
 	acc_class = class_create(THIS_MODULE, "accelerometer");
 
 	if (IS_ERR(acc_class)) 
 		return PTR_ERR( acc_class );
 
-	dev_t = device_create( acc_class, NULL, MKDEV(ACC_DEV_MAJOR, 0), "%s", "accelerometer");
-
-	if (device_create_file(dev_t, &dev_attr_acc_file) < 0)
-		printk("Failed to create device file(%s)!\n", dev_attr_acc_file.attr.name);
-
-	if (IS_ERR(dev_t)) 
+	bma_dev_t = device_create( acc_class, NULL, MKDEV(ACC_DEV_MAJOR, 0), "%s", "accelerometer");
+	
+	if (IS_ERR(bma_dev_t)) 
 	{
-		return PTR_ERR(dev_t);
+		return PTR_ERR(bma_dev_t);
 	}
+
+	if (device_create_file(bma_dev_t, &dev_attr_acc_file) < 0)
+		printk("Failed to create device file(%s)!\n", dev_attr_acc_file.attr.name);
 
 	return i2c_add_driver(&bma_accel_driver);
 }
@@ -1249,9 +1693,8 @@ static void __exit BMA_exit(void)
 	class_destroy( acc_class );
 }
 
+
+
 module_init(BMA_init);
 module_exit(BMA_exit);
-
-
-
 

@@ -86,6 +86,7 @@
 
 #define __TEMPERATURE_DEBUG_CONTROL__
 //#define __COMPENSATE_SAMPLE__
+#define __CONTROL_CHARGING_SUDDEN_LEVEL_UP__
 
 
 #define BATTERY_RPC_PROG	0x30000089
@@ -149,6 +150,7 @@ typedef enum {
 	SMEM_PROC_COMM_CHARGING_OFF = 0x0,
 	SMEM_PROC_COMM_CHARGING_ON_TA,
 	SMEM_PROC_COMM_CHARGING_ON_USB,
+////	SMEM_PROC_COMM_CHARGING_INTR_FSA,
 }charging_ctrl;
 
 // SMEM_PROC_COMM_GET_ADC data 1
@@ -448,10 +450,10 @@ struct msm_battery_info {
 #define PQL_MASK				(0x1 << 1)
 #define CHGROUTOV_MASK		(0x1 << 0)
 
-#define CHG_OFF_LOW_TEMP 127
-#define CHG_RESTART_LOW_TEMP 123
-#define CHG_OFF_HIGH_TEMP 39
-#define CHG_RESTART_HIGH_TEMP 45
+#define CHG_OFF_LOW_TEMP 122
+#define CHG_RESTART_LOW_TEMP 118
+#define CHG_RESTART_HIGH_TEMP 42
+#define CHG_OFF_HIGH_TEMP 38
 
 #define CHG_OFF_LEVEL 146
 #define CHG_RESTART_LEVEL 139
@@ -478,6 +480,8 @@ static int gTimer = 0;
 static int gRechg_start = 0;
 static int gTimeover_start = 0;
 
+static int VF_check_done = 0;
+
 //init Value
 static int tempInterrupt=CHARGING_TEMPERATURE_NORMAL;
 static int dwChargingState=CHARGING_STATE_INIT_BATTERY;
@@ -491,6 +495,28 @@ static int Pre_batt_capacity = 100;
 static int boot_done = 0;
 static int boot_cnt = 0;
 
+static int g_chg_en = 0;
+
+//fatory jig check 2010.08.06 Huh Won
+int batt_jig_on_status=0;
+EXPORT_SYMBOL(batt_jig_on_status);
+
+/* sys fs */
+struct class *jig_class;
+EXPORT_SYMBOL(jig_class);
+struct device *jig_dev;
+EXPORT_SYMBOL(jig_dev);
+ 
+static ssize_t jig_show(struct device *dev, struct device_attribute *attr, char *buf);
+static DEVICE_ATTR(jig , S_IRUGO | S_IWUSR | S_IWOTH | S_IXOTH, jig_show, NULL);
+
+static ssize_t jig_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", batt_jig_on_status );
+}
+/* sys fs */
+
+static int second_chg_type=0;
 unsigned int on_call = 0;
 
 static void msm_batt_wait_for_batt_chg_event(struct work_struct *work);
@@ -967,7 +993,8 @@ static int msm_batt_power_get_property(struct power_supply *psy,
 		val->intval = msm_batt_info.battery_temp;
 		break;		
 	case POWER_SUPPLY_PROP_BATT_VOL_AVER:
-		val->intval = msm_batt_info.battery_voltage;
+		//val->intval = msm_batt_info.battery_voltage;
+		val->intval = second_chg_type;
 		break;
 	case POWER_SUPPLY_PROP_BATT_TEMP_AVER:
 		val->intval = dwChargingState;
@@ -1005,6 +1032,7 @@ extern int fsa9280_i2c_read(unsigned char u_addr, unsigned char *pu_data);
 #define BATT_LEVEL5_VOLT	3860
 #define BATT_LEVEL6_VOLT	3990
 #define BATT_FULL_VOLT		4200
+#define BATT_RECHAR_VOLT	4140
 
 #define BATT_LOW_ADC		2225//2158
 #define BATT_LEVEL1_ADC	2589
@@ -1014,8 +1042,11 @@ extern int fsa9280_i2c_read(unsigned char u_addr, unsigned char *pu_data);
 #define BATT_LEVEL5_ADC	3035
 #define BATT_LEVEL6_ADC	3260
 #define BATT_FULL_ADC		3620
-
 #define BATT_RECHR_ADC		3515
+
+#define BATT_BUF		10
+#define BATT_THR		30
+
 
 //#define BATT_FULL_ADC		3440
 //#define BATT_FULL_VOLT		4150
@@ -1054,8 +1085,8 @@ void batt_deregistertimer(struct timer_list* ptimer)
 	//printk(KERN_ERR "[Battery] %s Before\n", __func__);
 	if(bSetTimer){
 	//printk(KERN_ERR "[Battery] %s After\n", __func__);
-	bSetTimer =0;
 	del_timer( ptimer );
+	bSetTimer =0;
 	}
 }
 
@@ -1080,42 +1111,49 @@ int get_batt_adc(int adc_data_type)
 int calculate_batt_level(int batt_volt)
 {
 	int scaled_level = 0;
+	
 
-	if(batt_volt >= BATT_FULL_VOLT) //99%
+	//if(batt_volt >= BATT_FULL_VOLT) //99%
+	if(batt_volt >= BATT_RECHAR_VOLT) //100%
 	{
-		scaled_level = 99;
+		scaled_level = 100;
 	}
-	else if(batt_volt >=  BATT_LEVEL6_VOLT) //99% ~ 90%
+	else if(batt_volt >=  BATT_LEVEL6_VOLT) //99% ~ 80%
 	{
-		scaled_level = ((batt_volt -BATT_LEVEL6_VOLT)*9)/(BATT_FULL_VOLT-BATT_LEVEL6_VOLT);
- 		scaled_level = scaled_level+90;
+//		scaled_level = ((batt_volt -BATT_LEVEL6_VOLT+1)*9)/(BATT_FULL_VOLT-BATT_LEVEL6_VOLT);
+		scaled_level = ((batt_volt -BATT_LEVEL6_VOLT+1)*19)/(BATT_RECHAR_VOLT-BATT_LEVEL6_VOLT);
+// 		scaled_level = scaled_level+90;
+ 		scaled_level = scaled_level+80;
 	}
-	else if(batt_volt >= BATT_LEVEL5_VOLT) //90% ~ 70%
+	else if(batt_volt >= BATT_LEVEL5_VOLT) //79% ~ 65%
 	{
-		scaled_level = ((batt_volt -BATT_LEVEL5_VOLT)*20)/(BATT_LEVEL6_VOLT-BATT_LEVEL5_VOLT);
- 		scaled_level = scaled_level+70;
+		scaled_level = ((batt_volt -BATT_LEVEL5_VOLT)*15)/(BATT_LEVEL6_VOLT-BATT_LEVEL5_VOLT);
+// 		scaled_level = scaled_level+70;
+ 		scaled_level = scaled_level+65;
 	}
-	else if(batt_volt >= BATT_LEVEL4_VOLT) //70% ~ 50%
+	else if(batt_volt >= BATT_LEVEL4_VOLT) //64% ~ 50%
 	{
-		scaled_level = ((batt_volt -BATT_LEVEL4_VOLT)*20)/(BATT_LEVEL5_VOLT-BATT_LEVEL4_VOLT);
+		scaled_level = ((batt_volt -BATT_LEVEL4_VOLT)*15)/(BATT_LEVEL5_VOLT-BATT_LEVEL4_VOLT);
+// 		scaled_level = scaled_level+50;
  		scaled_level = scaled_level+50;
 	}
-	else if(batt_volt >= BATT_LEVEL3_VOLT) //50% ~ 30%
+	else if(batt_volt >= BATT_LEVEL3_VOLT) //49% ~ 35%
 	{
-		scaled_level = ((batt_volt -BATT_LEVEL3_VOLT)*20)/(BATT_LEVEL4_VOLT-BATT_LEVEL3_VOLT);
- 		scaled_level = scaled_level+30;
+		scaled_level = ((batt_volt -BATT_LEVEL3_VOLT)*15)/(BATT_LEVEL4_VOLT-BATT_LEVEL3_VOLT);
+// 		scaled_level = scaled_level+30;
+		scaled_level = scaled_level+35;
 	}
-	else if(batt_volt >= BATT_LEVEL2_VOLT) //30% ~ 15%
+	else if(batt_volt >= BATT_LEVEL2_VOLT) //34% ~ 20%
 	{
 		scaled_level = ((batt_volt -BATT_LEVEL2_VOLT)*15)/(BATT_LEVEL3_VOLT-BATT_LEVEL2_VOLT);
- 		scaled_level = scaled_level+15;
+ 		scaled_level = scaled_level+20;
 	}
-	else if(batt_volt >= BATT_LEVEL1_VOLT) //15% ~ 5%
+	else if(batt_volt >= BATT_LEVEL1_VOLT) //19% ~ 5%
 	{
-		scaled_level = ((batt_volt -BATT_LEVEL1_VOLT)*10)/(BATT_LEVEL2_VOLT-BATT_LEVEL1_VOLT);
+		scaled_level = ((batt_volt -BATT_LEVEL1_VOLT)*15)/(BATT_LEVEL2_VOLT-BATT_LEVEL1_VOLT);
  		scaled_level = scaled_level+5;
 	}
-	else if(batt_volt > BATT_LOW_VOLT) //5% ~ 1%
+	else if(batt_volt > BATT_LOW_VOLT) //4% ~ 1%
 	{
 		scaled_level = ((batt_volt -BATT_LOW_VOLT)*4)/(BATT_LEVEL1_VOLT-BATT_LOW_VOLT);
  		scaled_level = scaled_level+1;
@@ -1131,21 +1169,55 @@ int calculate_batt_level(int batt_volt)
 	return scaled_level;
 }
 
+#define BATT_CAL_CHG 150
+
 int calculate_batt_voltage(int vbatt_adc)
 {
 	int batt_volt = 0;
-/*	
-	int temp =0;
 
-	if(vbatt_adc < BATT_LOW_ADC)
-		return BATT_LOW_VOLT;
+	static int BatMax = 0;
+	static int BatMin = 0;
+	int BatSum = 0;
+	static int BatCount = 0;
+	static int BatAvg = 1;
+	static int batt_val[BATT_BUF] = {0,};
+	static int prevVal = 0;
+	int i = 0;
+
+#ifdef __CONTROL_CHARGING_SUDDEN_LEVEL_UP__
+	if(!prevVal)
+	prevVal = vbatt_adc;
+
+	//Add charging buffering for sudden level up
+	if(vbatt_adc<BATT_RECHR_ADC)
+	{		
+		if(g_chg_en)
+		{
+			if( prevVal < (vbatt_adc-BATT_CAL_CHG))
+			{	
+				vbatt_adc = vbatt_adc-BATT_CAL_CHG;		
+				printk("[Battery] vbatt_adc-BATT_CAL_CHG \n");
+			}	
+			else
+			{
+				vbatt_adc = prevVal;
+				printk("[Battery] chg_en & prevVal \n");
+			}	
+		}
+		else
+		{
+			if(prevVal<vbatt_adc)
+			{
+				vbatt_adc = prevVal;
+				//printk("[Battery] prevVal \n");
+			}
+		}
+	}
+	prevVal = vbatt_adc;
+#endif	
 	
-	temp = vbatt_adc - BATT_LOW_ADC;
-	temp *= BATT_VOLT_RANGE;
-	temp /= BATT_ADC_RANGE;
+	//printk("[Battery] %s : vbatt_adc %d \n", __func__, vbatt_adc);
 	
-	batt_volt = BATT_LOW_VOLT + temp;
-*/
 	if(vbatt_adc >= BATT_FULL_ADC)
 	{
 		batt_volt = BATT_FULL_VOLT;
@@ -1206,6 +1278,11 @@ static int charging_control(charging_ctrl on)
 		printk(KERN_ERR "[Battery] %s :SMEM_PROC_COMM_CHARGING_INFO %d fail %d\n", __func__, data1, res);
 		return res;
 	}
+	if(on)
+		g_chg_en = 1;
+	else
+		g_chg_en = 0;
+		
 
 	return 0;
 }
@@ -1217,6 +1294,10 @@ static void msm_batt_update(void)
 	power_supply_changed(&msm_psy_batt);
 }
 
+// for TSP Lagging Issue : caused by Acryle	
+//extern int set_tsp_for_ta_detect(int state);
+int tsp_charger_type_status=0;
+EXPORT_SYMBOL(tsp_charger_type_status);
 
 //int get_charger_type(void)
 void get_charger_type(void)
@@ -1225,18 +1306,31 @@ void get_charger_type(void)
 	unsigned char dtype2 = 0, int2 = 0;
 	int charger_type = CHARGER_TYPE_NONE;
 	int temp_vf;
+	int ret=0;
+
+	int res = 0;
+	int data1 = SMEM_PROC_COMM_CHARGING_READ_STATUS;
+	int data2 = 0;
+	char event_flag = 0;
 	
-	//mdelay(100);
-	fsa9280_i2c_read(FSA_INT1, &int1);
+	//mdelay(300); 
+	ret=fsa9280_i2c_read(FSA_INT1, &int1);
 	mdelay(10);
 	fsa9280_i2c_read(FSA_INT2, &int2);
 	mdelay(10);
 	fsa9280_i2c_read(FSA_DTYPE1, &dtype1);
 	mdelay(10);
-	fsa9280_i2c_read(FSA_DTYPE2, &dtype2);
-	
+	fsa9280_i2c_read(FSA_DTYPE2, &dtype2);	
+
 	//printk(KERN_ERR "[Battery] %s : int1(0x%x) dtype1(0x%x)\n", __func__, int1, dtype1);
 	//printk(KERN_ERR "[Battery] %s : int2(0x%x) dtype2(0x%x)\n", __func__, int2, dtype2);
+
+	//fatory jig check 2010.08.06 Huh Won
+	
+	if(dtype2&0x01)
+		batt_jig_on_status=1;
+	else
+		batt_jig_on_status=0;
 	
 	if(dtype1==0x00)
 	{
@@ -1259,7 +1353,40 @@ void get_charger_type(void)
 		charger_type = CHARGER_TYPE_NONE;
 	}
 
+
+if(ret<0)
+{	
+	second_chg_type=1;
+
+//get_charging_status ++ it's for i2c error issue 2010.09.01 Greatone
+	res = msm_proc_comm(SMEM_PROC_COMM_CHARGING_INFO, &data1, &data2);
+	if(res < 0)
+	{
+		printk(KERN_ERR "[Battery] %s :SMEM_PROC_COMM_CHARGING_INFO : %d fail %d\n", __func__, data1, res);
+		//return res;
+	}
+	event_flag = (data2 & 0xF00) >> 8;
+	printk("[Battery] %s : ret =%x \n", __func__, ret);
+			
+	if(event_flag & CHG_CONNECT )	
+		charger_type = CHARGER_TYPE_USB_PC;
+
+//get_charging_status --
+}
+else
+	second_chg_type=0;
+
 	printk(KERN_ERR "[Battery] %s charger_type is (%d)\n", __func__, charger_type);
+	if( charger_type == CHARGER_TYPE_NONE || charger_type == CHARGER_TYPE_USB_PC )
+	{
+		tsp_charger_type_status = 0;
+//		set_tsp_for_ta_detect(0);
+	}
+	else
+	{
+		tsp_charger_type_status = 1;
+//		set_tsp_for_ta_detect(1);
+	}
 
 	msm_batt_info.charger_type = charger_type;
 
@@ -1287,17 +1414,22 @@ void get_charger_type(void)
 		wake_lock(&vbus_wake_lock);
 		printk("[Battery] %s : wake_lock!!! !!!!\n", __func__);
 
+		if(!VF_check_done)
+		{
 		//Check VF value ----------------------------------------
 		temp_vf = get_batt_adc(SMEM_PROC_COMM_GET_ADC_VF);
 		msm_batt_info.battery_vf = (temp_vf>>16) & 0xFFFF;
-
 		//printk("[Battery] %s : Check VF value [0x%d]\n", __func__, msm_batt_info.battery_vf);
-		
 		if(msm_batt_info.battery_vf > 15) 
 		msm_batt_info.current_chg_source = CHARGER_BATTERY;
-		//------------------------------------------------------		
+		//------------------------------------------------------	
+		//Finish vf check for first charger connect!!!
+		printk("[Battery] Check VF value [0x%d] (when first charger connected!)\n", msm_batt_info.battery_vf);
+		VF_check_done = 1;
+		}
 		
-        } else {
+        } 
+	else {
                 /* give userspace some time to see the uevent and update
                  * LED state or whatnot...
                  */
@@ -1723,10 +1855,12 @@ int GetAverageSample(int modified_sample){
 static int get_batt_info(void)
 {
 	int Alldata = 0;
-	spin_lock(&msm_batt_info.lock);
+// hsil
+//	spin_lock(&msm_batt_info.lock);
 
 	Alldata = get_batt_adc(SMEM_PROC_COMM_GET_ADC_ALL);
-	
+
+		
 	msm_batt_info.battery_level	=(Alldata>>16) & 0xFFFF;
 	msm_batt_info.battery_temp	= Alldata & 0xFFFF;
 
@@ -1740,34 +1874,34 @@ static int get_batt_info(void)
 	else if (msm_batt_info.battery_temp >= 132)	
 		msm_batt_info.battery_Celsius = -150;
 	
-	else if (msm_batt_info.battery_temp >= 129)	
+	else if (msm_batt_info.battery_temp >= 128)	
 		msm_batt_info.battery_Celsius = -100;
 	
-	else if (msm_batt_info.battery_temp >= 126 )	
+	else if (msm_batt_info.battery_temp >= 122 )	
 		msm_batt_info.battery_Celsius = -50;
 	
-	else if (msm_batt_info.battery_temp >= 120)	
+	else if (msm_batt_info.battery_temp >= 118)	
 		msm_batt_info.battery_Celsius = 0;
 	
-	else if (msm_batt_info.battery_temp >= 118)	
+	else if (msm_batt_info.battery_temp >= 116)	
 		msm_batt_info.battery_Celsius = 50;
 	
-	else if (msm_batt_info.battery_temp >= 112)	
+	else if (msm_batt_info.battery_temp >= 110)	
 		msm_batt_info.battery_Celsius = 100;
 	
-	else if (msm_batt_info.battery_temp >= 106)	
+	else if (msm_batt_info.battery_temp >= 104)	
 		msm_batt_info.battery_Celsius = 150;
 	
-	else if (msm_batt_info.battery_temp >= 100)	
+	else if (msm_batt_info.battery_temp >= 96)	
 		msm_batt_info.battery_Celsius = 200;
 	
-	else if (msm_batt_info.battery_temp >= 93)	
+	else if (msm_batt_info.battery_temp >= 89)	
 		msm_batt_info.battery_Celsius = 250;
 	
-	else if (msm_batt_info.battery_temp >= 84)	
+	else if (msm_batt_info.battery_temp >= 82)	
 		msm_batt_info.battery_Celsius = 300;
 	
-	else if (msm_batt_info.battery_temp >= 77 )	
+	else if (msm_batt_info.battery_temp >= 76 )	
 		msm_batt_info.battery_Celsius = 350;
 	
 	else if (msm_batt_info.battery_temp >= 69)	
@@ -1776,23 +1910,28 @@ static int get_batt_info(void)
 	else if (msm_batt_info.battery_temp >= 62)	
 		msm_batt_info.battery_Celsius = 450;
 	
-	else if (msm_batt_info.battery_temp >= 55)	
+	else if (msm_batt_info.battery_temp >= 56)	
 		msm_batt_info.battery_Celsius = 500;
 	
 	else if (msm_batt_info.battery_temp >= 50 )	
 		msm_batt_info.battery_Celsius = 550;
 	
-	else if (msm_batt_info.battery_temp >= 48 )
+	else if (msm_batt_info.battery_temp >= 42 )
 		msm_batt_info.battery_Celsius = 580;
 
-	else if (msm_batt_info.battery_temp >= 45 )
+	else if (msm_batt_info.battery_temp >= 40 )
 		msm_batt_info.battery_Celsius = 600;
 
-	else if (msm_batt_info.battery_temp >= 43 )
+	else if (msm_batt_info.battery_temp >= 38 )
 		msm_batt_info.battery_Celsius = 630;
 	else
 		msm_batt_info.battery_Celsius = 640;
+	
 
+
+
+
+	
 	//printk("[Battery] %s : All vf	ADC Value =%d \n", __func__, msm_batt_info.battery_vf);
 	//printk("[Battery] %s : All Vol	ADC Value =%d \n", __func__, msm_batt_info.battery_level);
 	//printk("[Battery] %s : All Temp	ADC Value =%d \n", __func__, msm_batt_info.battery_temp);
@@ -1810,7 +1949,7 @@ static int get_batt_info(void)
 #endif
 
 	//Calculate Average Sample
-	//msm_batt_info.battery_level = GetAverageSample(msm_batt_info.battery_level);
+	msm_batt_info.battery_level = GetAverageSample(msm_batt_info.battery_level);
 
 	//printk("[Battery] %s : After Vol    ADC Value =%d \n", __func__, msm_batt_info.battery_level);
 	//printk("[Battery] %s : After Temp ADC Value =%d \n", __func__, msm_batt_info.battery_temp);
@@ -1820,14 +1959,17 @@ static int get_batt_info(void)
 	msm_batt_info.batt_capacity = calculate_batt_level(msm_batt_info.battery_voltage);
 
 	msm_batt_info.charger_status = CHARGER_STATUS_GOOD; // temp
-	spin_unlock(&msm_batt_info.lock);
+// hsil
+//	spin_unlock(&msm_batt_info.lock);
 /*
 	printk("[Battery] %s : charger_status = %s, charger_type = %s,"
-		" batt_volt = %d, batt_temp = %d,\n", __func__, 
+		" batt_volt = %d,batt_level = %d, batt_temp = %d, CHG: %d FUll : %d TIME : %d \n", __func__, 
 		charger_status[msm_batt_info.charger_status],
 		charger_type[msm_batt_info.charger_type],
 		msm_batt_info.battery_voltage,
-		msm_batt_info.battery_temp);
+		msm_batt_info.batt_capacity,
+		msm_batt_info.battery_temp,
+		gChg_connect,gFull_chg,gTimer);
 */
 	return 0;
 }
@@ -1872,7 +2014,10 @@ static int msm_batt_resume(struct platform_device *pdev)
 
 int battery_restart(void)
 {
-	//printk(KERN_ERR "[Battery] %s\n", __func__);
+	printk(KERN_ERR "[Battery] %s\n", __func__);
+
+////	printk("[Battery] %s : Send proc INTR_FSA\n", __func__);
+////	charging_control(SMEM_PROC_COMM_CHARGING_INTR_FSA);	
 
 	batt_deregistertimer(&msm_batt_info.timer);
 
@@ -2931,6 +3076,9 @@ static int msm_batt_enable_filter(u32 vbatt_filter)
 	}
 }
 
+// hsil
+int batt_init_done = 0;
+EXPORT_SYMBOL(batt_init_done);
 
 static int __devinit msm_batt_probe(struct platform_device *pdev)
 {
@@ -3036,6 +3184,20 @@ static int __devinit msm_batt_probe(struct platform_device *pdev)
 	batt_registertimer( &msm_batt_info.timer, BATT_CHECK_INTERVAL );
 #endif
 
+	/* sys fs */
+	jig_class = class_create(THIS_MODULE, "jig");
+	if (IS_ERR(jig_class))
+		pr_err("Failed to create class(jig)!\n");
+
+	jig_dev = device_create(jig_class, NULL, 0, NULL, "jig");
+	if (IS_ERR(jig_dev))
+		pr_err("Failed to create device(jig)!\n");
+
+	if (device_create_file(jig_dev, &dev_attr_jig) < 0)
+		pr_err("Failed to create device file(%s)!\n", dev_attr_jig.attr.name); 
+	/* sys fs */
+
+	batt_init_done = 1; 	// hsil
 	return 0;
 }
 
@@ -3232,7 +3394,7 @@ static int __init msm_batt_init(void)
 
 	//check Charger connect status during init!!!!
 	get_charger_type();
-	get_charging_status();	
+	get_charging_status();
 	get_batt_info();
 	check_charging_status(dwChargingState);
 	msm_batt_update();	

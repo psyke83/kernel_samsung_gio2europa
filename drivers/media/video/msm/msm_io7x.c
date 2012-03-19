@@ -1,5 +1,7 @@
 #if defined(CONFIG_MACH_CALLISTO)
 #include "msm_io7x_callisto.c"
+#elif defined(CONFIG_MACH_EUROPA)
+#include "msm_io7x_europa.c"
 #elif defined(CONFIG_MACH_COOPER)
 #include "msm_io7x_cooper.c"
 #elif defined(CONFIG_MACH_BENI)

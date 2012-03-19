@@ -1,5 +1,7 @@
 #if defined(CONFIG_MACH_COOPER)
 #include "synaptics_i2c_rmi4_cooper.c"
+#elif defined(CONFIG_MACH_EUROPA)
+#include "synaptics_i2c_rmi4_europa.c"
 #elif defined(CONFIG_MACH_BENI)
 #include "synaptics_i2c_rmi4_beni.c"
 #elif defined(CONFIG_MACH_TASS)

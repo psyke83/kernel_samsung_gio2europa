@@ -104,6 +104,135 @@
 /* Using upper 1/2MB of Apps Bootloader memory*/
 #define MSM_PMEM_AUDIO_START_ADDR	0x80000ul
 
+extern int board_hw_revision;
+
+#define	WLAN_RESET_N	82
+#define VDD_WLAN_EN	77
+#define	BT_PWR		88
+static int gpio_wlan_reset_n = 82;
+
+#ifdef CONFIG_SAMSUNG_JACK
+
+#define GPIO_JACK_S_35	28
+#define GPIO_SEND_END	29
+
+static struct sec_jack_zone jack_zones[] = {
+	[0] = {
+		.adc_high	= 3,
+		.delay_ms	= 10,
+		.check_count	= 5,
+		.jack_type	= SEC_HEADSET_3POLE,
+	},
+	[1] = {
+		.adc_high	= 99,
+		.delay_ms	= 10,
+		.check_count	= 10,
+		.jack_type	= SEC_HEADSET_3POLE,
+	},
+	[2] = {
+		.adc_high	= 9999,
+		.delay_ms	= 10,
+		.check_count	= 5,
+		.jack_type	= SEC_HEADSET_4POLE,
+	},
+};
+
+static int get_stealth_det_jack_state(void)
+{
+	/* Active Low */
+	return(gpio_get_value(GPIO_JACK_S_35)) ^ 1;
+}
+
+static int get_stealth_send_key_state(void)
+{
+	/* Active High */
+	return(gpio_get_value(GPIO_SEND_END));
+}
+
+#define SMEM_PROC_COMM_MICBIAS_ONOFF	PCOM_OEM_MICBIAS_ONOFF
+#define SMEM_PROC_COMM_GET_ADC			PCOM_OEM_SAMSUNG_GET_ADC
+enum {
+	SMEM_PROC_COMM_GET_ADC_BATTERY = 0x0,
+	SMEM_PROC_COMM_GET_ADC_TEMP,
+	SMEM_PROC_COMM_GET_ADC_VF,
+	SMEM_PROC_COMM_GET_ADC_ALL, // data1 : VF(MSB 2 bytes) vbatt_adc(LSB 2bytes), data2 : temp_adc
+	SMEM_PROC_COMM_GET_ADC_EAR_ADC,		// 3PI_ADC
+	SMEM_PROC_COMM_GET_ADC_MAX,
+};
+
+enum {
+	SMEM_PROC_COMM_MICBIAS_CONTROL_OFF = 0x0,
+	SMEM_PROC_COMM_MICBIAS_CONTROL_ON,
+	SMEM_PROC_COMM_MICBIAS_CONTROL_MAX
+};
+
+static void set_stealth_micbias_state(bool state)
+{
+	int res = 0;
+	int data1 = 0;
+	int data2 = 0;
+	if (state)
+	{
+		data1 = SMEM_PROC_COMM_MICBIAS_CONTROL_ON;
+	}
+	else
+	{
+		data1 = SMEM_PROC_COMM_MICBIAS_CONTROL_OFF;
+	}
+	res = msm_proc_comm(SMEM_PROC_COMM_MICBIAS_ONOFF, &data1, &data2);
+	if(res < 0)
+	{
+		pr_err("sec_jack: micbias %s  fail \n",state?"on":"off");
+	}
+}
+
+static int sec_jack_get_adc_value(void)
+{
+	int res = 0;
+	int data1 = SMEM_PROC_COMM_GET_ADC_EAR_ADC;
+	int data2 = 0;
+
+	res = msm_proc_comm(SMEM_PROC_COMM_GET_ADC, &data1, &data2);
+	if(res < 0)
+	{
+		pr_err("sec_jack: get_adc fail \n");
+		return res;
+	}
+	return data1;
+}
+
+void sec_jack_gpio_init(void)
+{
+	if(gpio_request(GPIO_JACK_S_35, "h2w_detect")<0)
+		pr_err("sec_jack:gpio_request fail\n");
+	if(gpio_direction_input(GPIO_JACK_S_35)<0)
+		pr_err("sec_jack:gpio_direction fail\n");
+	if(gpio_request(GPIO_SEND_END , "h2w_button")<0)
+		pr_err("sec_jack:gpio_request fail\n");
+	if(gpio_direction_input(GPIO_SEND_END )<0)
+		pr_err("sec_jack:gpio_direction fail\n");
+}
+
+static struct sec_jack_platform_data sec_jack_data = {
+	.get_det_jack_state	= get_stealth_det_jack_state,
+	.get_send_key_state	= get_stealth_send_key_state,
+	.set_micbias_state	= set_stealth_micbias_state,
+	.get_adc_value	= sec_jack_get_adc_value,
+	.zones		= jack_zones,
+	.num_zones	= ARRAY_SIZE(jack_zones),
+	.det_int	= MSM_GPIO_TO_INT(GPIO_JACK_S_35),
+	.send_int	= MSM_GPIO_TO_INT(GPIO_SEND_END),
+};
+
+static struct platform_device sec_device_jack = {
+	.name           = "sec_jack",
+	.id             = -1,
+	.dev            = {
+		.platform_data  = &sec_jack_data,
+	},
+};
+#endif
+
 static struct resource smc91x_resources[] = {
 	[0] = {
 		.start	= 0x9C004300,
@@ -405,7 +534,8 @@ static struct snd_endpoint snd_endpoints_list[] = {
 	SND(NO_MIC_HEADSET, 29),
 	SND(MEDIA_SPEAKER, 30),
 	SND(MEDIA_STEREO_HEADSET, 31),
-	SND(CURRENT, 33),
+	SND(BT_NSEC_OFF, 32),
+	SND(CURRENT, 34),
 };
 #undef SND
 
@@ -543,7 +673,7 @@ static struct android_pmem_platform_data android_pmem_pdata = {
 static struct android_pmem_platform_data android_pmem_adsp_pdata = {
 	.name = "pmem_adsp",
 	.allocator_type = PMEM_ALLOCATORTYPE_BITMAP,
-	.cached = 1,
+	.cached = 0,
 };
 
 static struct android_pmem_platform_data android_pmem_audio_pdata = {
@@ -682,11 +812,13 @@ static void config_lcdc_gpio_table(uint32_t *table, int len, unsigned enable)
 	}
 }
 
+#if defined(CONFIG_FB_MSM_LCDC_S6D04M0_QVGA)
 static void lcdc_s6d04m0_config_gpios(int enable)
 {
 	config_lcdc_gpio_table(lcdc_gpio_table,
 		ARRAY_SIZE(lcdc_gpio_table), enable);
 }
+#endif
 
 static char *msm_fb_lcdc_vreg[] = {
 	"ldo3"
@@ -728,6 +860,7 @@ static struct lcdc_platform_data lcdc_pdata = {
 	.lcdc_power_save   = msm_fb_lcdc_power_save,
 };
 
+#if defined(CONFIG_FB_MSM_LCDC_S6D04M0_QVGA)
 static struct msm_panel_common_pdata lcdc_s6d04m0_panel_data = {
 	.panel_config_gpio = lcdc_s6d04m0_config_gpios,
 	.gpio_num          = gpio_array_num,
@@ -740,6 +873,7 @@ static struct platform_device lcdc_s6d04m0_panel_device = {
 		.platform_data = &lcdc_s6d04m0_panel_data,
 	}
 };
+#endif
 
 static struct resource msm_fb_resources[] = {
 	{
@@ -753,10 +887,12 @@ static int msm_fb_detect_panel(const char *name)
 
 //	if (machine_is_msm7x25_ffa() || machine_is_msm7x27_ffa()) {
 //		if (!strcmp(name, "lcdc_gordon_vga"))
+#if defined(CONFIG_FB_MSM_LCDC_S6D04M0_QVGA)
 		if (!strcmp(name, "lcdc_s6d04m0_qvga"))
 			ret = 0;
 		else
 			ret = -ENODEV;
+#endif
 //	}
 
 	return ret;
@@ -781,23 +917,21 @@ static struct platform_device msm_fb_device = {
 static void keypad_gpio_control(struct platform_device *pdev)
 {
 	int i, ret;
+	int config;
 	struct gpio_event_platform_data *p = (struct gpio_event_platform_data *)pdev->dev.platform_data;
-	struct gpio_event_info *info = (struct gpio_event_info *)p->info;
-	struct gpio_event_matrix_info *minfo = (struct gpio_event_matrix_info *)container_of(info, struct gpio_event_matrix_info, info);
+        struct gpio_event_info *info = *p->info;
+        struct gpio_event_matrix_info *minfo = container_of(info, struct gpio_event_matrix_info, info);
 
-	/*
-	for(i=0; i<minfo->noutputs; i++)
+	for(i=0; i<minfo->noutputs; i++) // KBC
 		{
-		int config = GPIO_CFG(minfo->output_gpios[i], 0, GPIO_OUTPUT, GPIO_NO_PULL, GPIO_2MA);
+		config = GPIO_CFG(minfo->output_gpios[i], 0, GPIO_OUTPUT, GPIO_NO_PULL, GPIO_2MA);
 		ret = gpio_tlmm_config(config, GPIO_ENABLE);
 		if (ret) 
 			printk(KERN_ERR "%s: gpio_tlmm_config(%#x)=%d\n", __func__, minfo->output_gpios[i], ret);
 		}
-	*/
-
-	for(i=0; i<minfo->ninputs; i++)
+	for(i=0; i<minfo->ninputs; i++)	// KBR
 		{
-		int config = GPIO_CFG(minfo->input_gpios[i], 0, GPIO_INPUT, GPIO_PULL_UP, GPIO_2MA);
+		config = GPIO_CFG(minfo->input_gpios[i], 0, GPIO_INPUT, GPIO_PULL_UP, GPIO_2MA);
 		ret = gpio_tlmm_config(config, GPIO_ENABLE);
 		if (ret) 
 			printk(KERN_ERR "%s: gpio_tlmm_config(%#x)=%d\n", __func__, minfo->output_gpios[i], ret);
@@ -847,6 +981,36 @@ static unsigned bt_config_power_off[] = {
 void wlan_setup_clock(int on);
 extern int bluesleep_start(void);
 extern void bluesleep_stop(void);
+
+#if defined(CONFIG_MACH_EUROPA)
+static void bluetooth_setup_power(int on)
+{
+	struct vreg *vreg_bt_2_6v;	
+
+	vreg_bt_2_6v = vreg_get(NULL, "ldo14");
+	if (IS_ERR(vreg_bt_2_6v)) {
+	printk(KERN_ERR "%s: vreg get failed (%ld)\n",
+		   __func__, PTR_ERR(vreg_bt_2_6v));
+	return;
+	}
+
+	printk("%s %s --enter\n", __func__, on ? "on" : "down");
+
+	if (on) {
+		vreg_set_level(vreg_bt_2_6v, OUT2600mV);
+		vreg_enable(vreg_bt_2_6v);		
+
+		/* additional delay for power on */
+		//mdelay(20);
+	}
+	else
+	{
+		/* power off for sleep current */
+		vreg_disable(vreg_bt_2_6v);
+	}
+}
+#endif
+
 static int bluetooth_power(int on)
 {
 	int pin, rc;
@@ -856,7 +1020,7 @@ static int bluetooth_power(int on)
 	if (on) {
 		/* If WiFi isn't working, 
 		   we should turn on the power for the clock supplied to BT */
-		if (gpio_get_value(82) == 0)
+		if (gpio_get_value(gpio_wlan_reset_n) == 0)
 			wlan_setup_clock(1);
 
 		for (pin = 0; pin < ARRAY_SIZE(bt_config_power_on); pin++) {
@@ -869,17 +1033,25 @@ static int bluetooth_power(int on)
 				return -EIO;
 			}
 		}
-		gpio_configure(88, GPIOF_DRIVE_OUTPUT | GPIOF_OUTPUT_HIGH);	/* BT_VREG_CTL */
 
-		msleep(100);
+#if defined(CONFIG_MACH_EUROPA)
+		bluetooth_setup_power(1); //jh8181.choi
+#endif
+		
+		gpio_configure(BT_PWR, GPIOF_DRIVE_OUTPUT | GPIOF_OUTPUT_HIGH);	/* BT_VREG_CTL */
+
+		mdelay(100);
 
 		bluesleep_start();
 		}
 	else {
 		bluesleep_stop();
-		
-		gpio_set_value(88, 0);										/* BT_VREG_CTL */
 
+		gpio_set_value(BT_PWR, 0);										/* BT_VREG_CTL */
+
+		if (gpio_get_value(gpio_wlan_reset_n) == 0)
+			wlan_setup_clock(0);
+		
 		for (pin = 0; pin < ARRAY_SIZE(bt_config_power_off); pin++) {
 #if 0 /* FIXME */		
 			rc = gpio_tlmm_config(bt_config_power_off[pin],
@@ -892,6 +1064,10 @@ static int bluetooth_power(int on)
 			}
 #endif
 		}
+				
+#if defined(CONFIG_MACH_EUROPA)
+		bluetooth_setup_power(0); //jh8181.choi
+#endif
 	}
 	return 0;
 }
@@ -1052,7 +1228,9 @@ static struct i2c_board_info mus_i2c_devices[] = {
 #ifdef CONFIG_MSM_CAMERA
 static uint32_t camera_off_gpio_table[] = {
 	/* parallel CAMERA interfaces */
+#if defined(CONFIG_MACH_EUROPA)
 	GPIO_CFG(0,  0, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_8MA), /* nCAM_3M_RST */
+#endif
 //	GPIO_CFG(1,  0, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_3M_STBY*/
 //	GPIO_CFG(2,  0, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_CIF_STBY */
 //	GPIO_CFG(3,  0, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_CIF_nRST */
@@ -1072,7 +1250,9 @@ static uint32_t camera_off_gpio_table[] = {
 
 static uint32_t camera_on_gpio_table[] = {
 	/* parallel CAMERA interfaces */
+#if defined(CONFIG_MACH_EUROPA)
 	GPIO_CFG(0,  0, GPIO_OUTPUT, GPIO_PULL_UP, GPIO_8MA), /* nCAM_3M_RST */
+#endif
 //	GPIO_CFG(1,  1, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_3M_STBY */
 //	GPIO_CFG(2,  1, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_CIF_STBY */
 //	GPIO_CFG(3,  1, GPIO_INPUT, GPIO_PULL_DOWN, GPIO_2MA), /* CAM_CIF_nRST */
@@ -1494,6 +1674,7 @@ static struct platform_device *devices[] __initdata = {
 
 #ifdef CONFIG_USB_ANDROID
 	&android_usb_device,
+	&mass_storage_device,
 #endif
 	&msm_device_i2c,
 	&touch_i2c_gpio_device,
@@ -1507,7 +1688,9 @@ static struct platform_device *devices[] __initdata = {
 	&android_pmem_adsp_device,
 	&android_pmem_audio_device,
 	&msm_fb_device,
+#ifdef CONFIG_FB_MSM_LCDC_S6D04M0_QVGA
 	&lcdc_s6d04m0_panel_device,
+#endif
 	&msm_device_uart_dm1,
 	&msm_device_uart_dm2,
 #ifdef CONFIG_BT
@@ -1571,7 +1754,11 @@ static void __init msm7x2x_init_irq(void)
 
 static struct msm_acpu_clock_platform_data msm7x2x_clock_data = {
 	.acpu_switch_time_us = 50,
+#ifdef CONFIG_800MHZ
+	.max_speed_delta_khz = 400000,
+#else
 	.max_speed_delta_khz = 256000,
+#endif
 	.vdd_switch_time_us = 62,
 	.max_axi_khz = 160000,
 };
@@ -1632,6 +1819,8 @@ static void sdcc_gpio_init(void)
 		pr_err("failed to request gpio sdc1_clk\n");
 #endif
 	if (machine_is_msm7x25_ffa())
+		return;
+
 	/* SDC2 GPIOs */
 #ifdef CONFIG_MMC_MSM_SDC2_SUPPORT
 	if (gpio_request(62, "sdc2_clk"))
@@ -1822,7 +2011,7 @@ static int register_wlan_status_notify(void (*callback)(int card_present, void *
 static unsigned int wlan_status(struct device *dev)
 {
 	int rc;
-	rc = gpio_get_value(82);
+	rc = gpio_get_value(gpio_wlan_reset_n);
 
 	return rc;
 }
@@ -1901,66 +2090,54 @@ static void wlan_host_wake_exit(void)
 
 void wlan_setup_clock(int on)
 {
-	struct vreg *vwlan_3_3v;	
-	struct vreg *vwlan_1_8v;
-#if (CONFIG_BOARD_REVISION == 1)
-	struct vreg *vwlan_3_3v_2;
+struct vreg *vwlan_3_3v; 
+ struct vreg *vwlan_1_8v;
 
-	vwlan_3_3v = vreg_get(NULL, "ldo18");
-	if (IS_ERR(vwlan_3_3v)) {
-		printk(KERN_ERR "%s: vreg get failed (%ld)\n",
-			   __func__, PTR_ERR(vwlan_3_3v));
-		return;
-	}
+ vwlan_3_3v = vreg_get(NULL, "ldo13");
+ if (IS_ERR(vwlan_3_3v)) {
+ printk(KERN_ERR "%s: vreg get failed (%ld)\n",
+     __func__, PTR_ERR(vwlan_3_3v));
+ return;
+ }
 
-	vwlan_3_3v_2 = vreg_get(NULL, "ldo19");
-	if (IS_ERR(vwlan_3_3v_2)) {
-		printk(KERN_ERR "%s: vreg get failed (%ld)\n",
-			   __func__, PTR_ERR(vwlan_3_3v_2));
-		return;
-	}
-#else
-	vwlan_3_3v = vreg_get(NULL, "ldo13");
-	if (IS_ERR(vwlan_3_3v)) {
-	printk(KERN_ERR "%s: vreg get failed (%ld)\n",
-		   __func__, PTR_ERR(vwlan_3_3v));
-	return;
-	}
-#endif
-	vwlan_1_8v = vreg_get(NULL, "ldo15");
-	if (IS_ERR(vwlan_1_8v)) {
-		printk(KERN_ERR "%s: vreg get failed (%ld)\n",
-			   __func__, PTR_ERR(vwlan_1_8v));
-		return;
-	}
+ vwlan_1_8v = vreg_get(NULL, "ldo15");
+ if (IS_ERR(vwlan_1_8v)) {
+  printk(KERN_ERR "%s: vreg get failed (%ld)\n",
+      __func__, PTR_ERR(vwlan_1_8v));
+  return;
+ }
 
-	printk("%s %s --enter\n", __func__, on ? "on" : "down");
+ printk("%s %s --enter\n", __func__, on ? "on" : "down");
 
-	if (on) {
-		vreg_set_level(vwlan_3_3v, OUT3300mV);
-		vreg_enable(vwlan_3_3v);		
-#if (CONFIG_BOARD_REVISION == 1)	
-		vreg_set_level(vwlan_3_3v_2, OUT3300mV);
-		vreg_enable(vwlan_3_3v_2);
-#endif
-		vreg_set_level(vwlan_1_8v, OUT1800mV);
-		vreg_enable(vwlan_1_8v);
-#if (CONFIG_BOARD_REVISION != 1)	
-		gpio_direction_output(77, 1);		/* VDD_WLAN_EN */
-#endif
-	}
+ if (on) {
+  vreg_set_level(vwlan_3_3v, OUT3300mV);
+  vreg_enable(vwlan_3_3v);  
+  vreg_set_level(vwlan_1_8v, OUT1800mV);
+  vreg_enable(vwlan_1_8v);
+  gpio_direction_output(VDD_WLAN_EN, 1);  /* VDD_WLAN_EN */
+  /* additional delay for power on */
+  mdelay(20);
+ }
+ else
+ {
+   gpio_direction_output(VDD_WLAN_EN, 0);  /* VDD_WLAN_EN Disable */ 
+  /* power off for sleep current */
+  vreg_disable(vwlan_3_3v);
+  vreg_disable(vwlan_1_8v);
+ }
 }
 
-void wlan_setup_power(int on)
+void wlan_setup_power(int on, int detect)
 {
 	printk("%s %s --enter\n", __func__, on ? "on" : "down");
 
 	if (on) {
-		if (gpio_get_value(88) == 0) {			
+		if (gpio_get_value(BT_PWR) == 0) {			
 			wlan_setup_clock(1);	
-			msleep(30);
+			mdelay(30);
 		}		
-		gpio_direction_output(82, 1);	/* WLAN_RESET */
+		gpio_tlmm_config(GPIO_CFG(gpio_wlan_reset_n,0,GPIO_OUTPUT,GPIO_NO_PULL, GPIO_16MA),GPIO_ENABLE); // nextfree.kim 2010-08-24 Wifi oA(AOAE c oA cC OAo)
+		gpio_direction_output(gpio_wlan_reset_n, 1);	/* WLAN_RESET */
 #ifdef WLAN_HOST_WAKE
 		wlan_host_wake_init();
 #endif /* WLAN_HOST_WAKE */
@@ -1969,15 +2146,24 @@ void wlan_setup_power(int on)
 #ifdef WLAN_HOST_WAKE
 		wlan_host_wake_exit();
 #endif /* WLAN_HOST_WAKE */
-		gpio_direction_output(82, 0);	/* WLAN_RESET */
+		gpio_direction_output(gpio_wlan_reset_n, 0);	/* WLAN_RESET */
+
+#if defined(CONFIG_MACH_EUROPA) /* Atheros */
+		if (gpio_get_value(BT_PWR) == 0) {
+			mdelay(30);
+			wlan_setup_clock(0);		
+		}
+#endif /* Atheros */
 	}	
 #ifndef ATH_POLLING
-		msleep(100);
+	mdelay(100);
+	if (detect) {
 		/* Detect card */
 		if (wlan_status_notify_cb)
 			wlan_status_notify_cb(on, wlan_devid);
 		else
 			printk(KERN_ERR "WLAN: No notify available\n");
+	}
 #endif /* ATH_POLLING */
 }
 EXPORT_SYMBOL(wlan_setup_power);
@@ -1992,6 +2178,9 @@ static struct mmc_platform_data msm7x2x_sdc1_data = {
 	.status_irq	= MSM_GPIO_TO_INT(49),
 	.irq_flags      = IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
 #endif
+#if 1 /* ATHEROS */
+	.dummy52_required = 1,
+#endif /* ATHEROS */
 	.msmsdcc_fmin   = 144000,
 	.msmsdcc_fmid   = 24576000,
 	.msmsdcc_fmax   = 49152000,
@@ -2021,6 +2210,10 @@ static struct mmc_platform_data msm7x2x_sdc3_data = {
 	.ocr_mask	= MMC_VDD_28_29,
 	.translate_vdd	= msm_sdcc_setup_power,
 	.mmc_bus_width  = MMC_CAP_4_BIT_DATA,
+	.msmsdcc_fmin	= 144000,
+	.msmsdcc_fmid	= 24576000,
+	.msmsdcc_fmax	= 49152000,
+	.nonremovable	= 0,
 };
 #endif
 
@@ -2029,6 +2222,10 @@ static struct mmc_platform_data msm7x2x_sdc4_data = {
 	.ocr_mask	= MMC_VDD_28_29,
 	.translate_vdd	= msm_sdcc_setup_power,
 	.mmc_bus_width  = MMC_CAP_4_BIT_DATA,
+	.msmsdcc_fmin	= 144000,
+	.msmsdcc_fmid	= 24576000,
+	.msmsdcc_fmax	= 49152000,
+	.nonremovable	= 0,
 };
 #endif
 
@@ -2127,7 +2324,11 @@ msm_i2c_gpio_config(int iface, int config_type)
 }
 
 static struct msm_i2c_platform_data msm_i2c_pdata = {
+#if 1//PCAM : Fast I2C
+	.clk_freq = 380000,
+#else//ORG : Normal I2C
 	.clk_freq = 100000,
+#endif//PCAM
 	.rmutex  = 0,
 	.pri_clk = 60,
 	.pri_dat = 61,
@@ -2183,7 +2384,7 @@ extern int arm9_uses_uart3;
 
 static void __init msm7x2x_init(void)
 {
-	int ret = 0;
+//	int ret = 0;
 
 	if (socinfo_init() < 0)
 		BUG();
@@ -2198,6 +2399,8 @@ static void __init msm7x2x_init(void)
 	msm_serial_debug_init(MSM_UART3_PHYS, INT_UART3,
 			&msm_device_uart3.dev, 1);
 #endif
+
+#if defined(CONFIG_SMC91X)
 	if (machine_is_msm7x25_ffa() || machine_is_msm7x27_ffa()) {
 		smc91x_resources[0].start = 0x98000300;
 		smc91x_resources[0].end = 0x980003ff;
@@ -2213,6 +2416,7 @@ static void __init msm7x2x_init(void)
 				__func__);
 		}
 	}
+#endif
 
 	if (cpu_is_msm7x27())
 		msm7x2x_clock_data.max_axi_khz = 200000;
@@ -2271,6 +2475,7 @@ static void __init msm7x2x_init(void)
 	msm_gadget_pdata.swfi_latency =
 		msm7x27_pm_data
 		[MSM_PM_SLEEP_MODE_RAMP_DOWN_AND_WAIT_FOR_INTERRUPT].latency;
+	msm_gadget_pdata.self_powered = 1;
 	msm_device_gadget_peripheral.dev.platform_data = &msm_gadget_pdata;
 #endif
 #endif
@@ -2281,6 +2486,8 @@ static void __init msm7x2x_init(void)
 	if ( !arm9_uses_uart3 )
 		platform_device_register(&msm_device_uart3);
 #endif
+	//
+	printk(KERN_INFO"%s : msm7x2x_init #####\n",__func__);
 
 #ifdef CONFIG_MSM_CAMERA
 	config_camera_off_gpios(); /* might not be necessary */
@@ -2365,11 +2572,12 @@ static void __init msm_msm7x2x_allocate_memory_regions(void)
 			"pmem arena\n", size, addr, __pa(addr));
 	}
 
-	size = MSM_PMEM_AUDIO_SIZE;
-	android_pmem_audio_pdata.start =  0x80000 ;
+	size = MSM_PMEM_AUDIO_SIZE ;
+	android_pmem_audio_pdata.start = MSM_PMEM_AUDIO_START_ADDR ;
 	android_pmem_audio_pdata.size = size;
-	pr_info("allocating %lu bytes at (0x80000 physical) for audio "
-			"pmem arena\n", size);
+	pr_info("allocating %lu bytes (at %lx physical) for audio "
+		"pmem arena\n", size , MSM_PMEM_AUDIO_START_ADDR);
+
 	size = fb_size ? : MSM_FB_SIZE;
 	addr = alloc_bootmem(size);
 	msm_fb_resources[0].start = __pa(addr);
@@ -2387,10 +2595,11 @@ static void __init msm_msm7x2x_allocate_memory_regions(void)
 	}
 #ifdef CONFIG_ARCH_MSM7X27
 	size = MSM_GPU_PHYS_SIZE;
+#ifdef	CONFIG_MACH_EUROPA
 	kgsl_resources[1].start = 0xD700000;
 	kgsl_resources[1].end = kgsl_resources[1].start + size - 1;
 	pr_info("allocating %lu bytes at (0xD700000 physical) for KGSL\n", size );
-
+#endif
 #endif
 
 }
@@ -2411,6 +2620,7 @@ static void __init msm7x2x_map_io(void)
 #endif
 }
 
+#ifdef	CONFIG_MACH_EUROPA
 MACHINE_START(MSM7X27_SURF, "GT-I5500 Board")
 #ifdef CONFIG_MSM_DEBUG_UART
 	.phys_io        = MSM_DEBUG_UART_PHYS,
@@ -2422,6 +2632,7 @@ MACHINE_START(MSM7X27_SURF, "GT-I5500 Board")
 	.init_machine	= msm7x2x_init,
 	.timer		= &msm_timer,
 MACHINE_END
+#endif
 
 MACHINE_START(MSM7X27_FFA, "QCT MSM7x27 FFA")
 #ifdef CONFIG_MSM_DEBUG_UART

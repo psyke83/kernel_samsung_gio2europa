@@ -52,7 +52,7 @@ static struct timer_list poweroff_keypad_timer;
 #endif
 
 #if defined(CONFIG_MACH_EUROPA)
-int wlan_debug_step;
+extern int wlan_debug_step;
 EXPORT_SYMBOL(wlan_debug_step);
 #endif
 
