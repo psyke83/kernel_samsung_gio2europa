@@ -223,6 +223,21 @@ static void msm_otg_start_host(struct otg_transceiver *xceiv, int on)
 		dev->start_host(xceiv->host, on);
 }
 
+static int msm_otg_are_interrupts_pending(struct msm_otg *dev)
+{
+	unsigned otgsc = readl(USB_OTGSC);
+
+	/* check if there are any pending otg interrupts */
+	if (((otgsc & OTGSC_INTR_MASK) >> 8) & otgsc) {
+		pr_info("%s: Interrupts while suspending phy: "
+			"otgsc:%08x\n", __func__, otgsc);
+		return 1;
+	}
+
+	return 0;
+
+}
+
 static int msm_otg_suspend(struct msm_otg *dev)
 {
 	unsigned long timeout;
@@ -251,8 +266,17 @@ static int msm_otg_suspend(struct msm_otg *dev)
 	}
 
 	ulpi_read(dev, 0x14);/* clear PHY interrupt latch register */
-	/* If there is no pmic notify support turn on phy comparators. */
-	if (!dev->pmic_notif_supp)
+	/*
+	 * Turn on PHY comparators if PMIC notifications are not available.
+	 *
+	 * PMIC notifications are designed to receive VBUS high only. We
+	 * should rely on PHY comparators for VBUS low interrupt. This does
+	 * not matter if we are connected to host. Because bus suspend is
+	 * not implemented. But if we don't enable PHY comparators and allow
+	 * LPM when wall charger is connected, we will not detect charger
+	 * disconnection.
+	 */
+	if (curr_chg == USB_CHG_TYPE__WALLCHARGER || !dev->pmic_notif_supp)
 		ulpi_write(dev, 0x01, 0x30);
 	ulpi_write(dev, 0x08, 0x09);/* turn off PLL on integrated phy */
 
@@ -260,11 +284,19 @@ static int msm_otg_suspend(struct msm_otg *dev)
 	disable_phy_clk();
 	while (!is_phy_clk_disabled()) {
 		if (time_after(jiffies, timeout)) {
+			if (msm_otg_are_interrupts_pending(dev))
+				goto out;
+
 			pr_err("%s: Unable to suspend phy\n", __func__);
+			/* check if there any pending interrupts
+			 * before re-setting the h/w
+			 */
 			otg_reset(&dev->otg);
 			goto out;
 		}
 		msleep(1);
+		if (msm_otg_are_interrupts_pending(dev))
+			goto out;
 	}
 
 	writel(readl(USB_USBCMD) | ASYNC_INTR_CTRL | ULPI_STP_CTRL, USB_USBCMD);

@@ -1008,7 +1008,7 @@ int mmc_resume_bus(struct mmc_host *host)
 
 	if(!err )
 	{
-		if (host->bus_ops->detect && !host->bus_dead)
+		if (host->bus_ops && host->bus_ops->detect && !host->bus_dead)
 			host->bus_ops->detect(host);
 	}
        else

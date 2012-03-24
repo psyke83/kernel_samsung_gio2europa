@@ -593,9 +593,8 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 	switch (blank_mode) {
 	case FB_BLANK_UNBLANK:
 		if (!mfd->panel_power_on) {
-			msleep(16);
-			ret = pdata->on(mfd->pdev);	
-			msleep(16);
+			mdelay(100);
+			ret = pdata->on(mfd->pdev);
 			if (ret == 0) {
 				mfd->panel_power_on = TRUE;
 
@@ -633,7 +632,7 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			curr_pwr_state = mfd->panel_power_on;
 			mfd->panel_power_on = FALSE;
 
-			msleep(16);
+			mdelay(100);
 #if defined(CONFIG_MACH_COOPER) || defined(CONFIG_MACH_BENI) || defined(CONFIG_MACH_TASS) || defined(CONFIG_MACH_LUCAS) || defined(CONFIG_MACH_GIO)
 			msm_fb_set_backlight(mfd, 0, 0);
 			ret = pdata->off(mfd->pdev);

@@ -251,10 +251,7 @@ static ssize_t print_switch_name(struct switch_dev *sdev, char *buf)
 
 static ssize_t print_switch_state(struct switch_dev *sdev, char *buf)
 {
-	struct usb_info *ui = the_usb_info;
-
-	return sprintf(buf, "%s\n",
-			(atomic_read(&ui->configured) ? "online" : "offline"));
+	return sprintf(buf, "%s\n", sdev->state ? "online" : "offline");
 }
 
 static ssize_t print_switch_name_vbus(struct switch_dev *sdev, char *buf)
@@ -351,15 +348,31 @@ static void usb_chg_detect(struct work_struct *w)
 	 * driver will reacquire wakelocks for any sub-sequent usb interrupts.
 	 * */
 	if (temp == USB_CHG_TYPE__WALLCHARGER) {
-		/* Workaround: Reset PHY in SE1 state */
+		/* Workaround: Reset Link and PHY to avoid of SE1 state */
 		otg->reset(ui->xceiv);
-		/* select DEVICE mode */
-		writel(0x12, USB_USBMODE);
-		msleep(1);
+
+		if (!is_b_sess_vld() && is_usb_online(ui)) {
+			pr_info("%s: Missed BSV interrupt\n", __func__);
+			msm_hsusb_set_vbus_state(0);
+			return;
+		}
+
 		otg_set_suspend(ui->xceiv, 1);
+	}
+
+	/* check if the cable status is changed after set_suspend */
+	if (!is_b_sess_vld() && is_usb_online(ui)) {
+		otg_set_suspend(ui->xceiv, 0);
+		pr_info("%s: Missed BSV interrupt-2\n", __func__);
+		msm_hsusb_set_vbus_state(0);
+		return;
+	}
+
+	if (temp == USB_CHG_TYPE__WALLCHARGER) {
 		msm72k_pm_qos_update(0);
 		wake_unlock(&ui->wlock);
 	}
+
 }
 
 static int usb_ep_get_stall(struct msm_endpoint *ept)
@@ -1287,7 +1300,7 @@ static void usb_do_work(struct work_struct *w)
 		spin_lock_irqsave(&ui->lock, iflags);
 		flags = ui->flags;
 		ui->flags = 0;
-		_vbus = is_usb_online(ui);
+		_vbus = is_b_sess_vld();
 		spin_unlock_irqrestore(&ui->lock, iflags);
 
 		/* give up if we have nothing to do */
@@ -1301,6 +1314,50 @@ static void usb_do_work(struct work_struct *w)
 				struct msm_otg *otg = to_msm_otg(ui->xceiv);
 
 				if (!_vbus) {
+					otg_set_suspend(ui->xceiv, 0);
+					dev_info(&ui->pdev->dev,
+						"msm72k_udc: IDLE->OFFLINE\n");
+					ui->state = USB_STATE_OFFLINE;
+
+					ui->chg_type = USB_CHG_TYPE__INVALID;
+					ui->chg_current = 0;
+					atomic_set(&ui->running, 0);
+					atomic_set(&ui->remote_wakeup, 0);
+					atomic_set(&ui->configured, 0);
+					msm72k_pullup_internal(&ui->gadget, 0);
+					hsusb_chg_connected(
+							USB_CHG_TYPE__INVALID);
+					switch_set_state(&ui->sdev, 0);
+
+					if (ui->irq) {
+						free_irq(ui->irq, ui);
+						ui->irq = 0;
+					}
+
+					flush_all_endpoints(ui);
+
+					if (ui->driver) {
+						dev_dbg(&ui->pdev->dev,
+							"usb:notify offline\n");
+						ui->driver->disconnect(&ui->gadget);
+					}
+					/* power down phy, clock down usb */
+					otg->reset(ui->xceiv);
+					otg_set_suspend(ui->xceiv, 1);
+
+					if (is_b_sess_vld() && !is_usb_online(ui)) {
+						pr_info("%s: missing vbus "
+						"interrupt ui->state=IDLE\n",
+							__func__);
+						otg_set_suspend(ui->xceiv, 0);
+						msm_hsusb_set_vbus_state(1);
+						break;
+					}
+
+					msm72k_pm_qos_update(0);
+					wake_unlock(&ui->wlock);
+					break;
+				} else if (!is_usb_online(ui)) {
 					ui->state = USB_STATE_OFFLINE;
 					break;
 				}
@@ -2122,7 +2179,7 @@ static ssize_t show_usb_chg_type(struct device *dev,
 
 	return count;
 }
-static DEVICE_ATTR(usb_state, S_IRUSR, show_usb_state, 0);
+static DEVICE_ATTR(usb_state, S_IRUGO, show_usb_state, 0);
 static DEVICE_ATTR(usb_speed, S_IRUSR, show_usb_speed, 0);
 static DEVICE_ATTR(chg_type, S_IRUSR, show_usb_chg_type, 0);
 static DEVICE_ATTR(chg_current, S_IWUSR | S_IRUSR,

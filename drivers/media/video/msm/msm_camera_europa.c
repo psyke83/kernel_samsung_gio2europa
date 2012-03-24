@@ -101,9 +101,9 @@ int g_v4l2_opencnt;
 
 static inline void free_qcmd(struct msm_queue_cmd *qcmd)
 {
-	if (!qcmd || !qcmd->on_heap)
+	if (!qcmd || !atomic_read(&qcmd->on_heap))
 		return;
-	if (!--qcmd->on_heap)
+	if (!atomic_sub_return(1, &qcmd->on_heap))
 		kfree(qcmd);
 }
 
@@ -156,6 +156,7 @@ static void msm_enqueue(struct msm_device_queue *queue,
 	spin_lock_irqsave(&__q->lock, flags);			\
 	CDBG("%s: draining queue %s\n", __func__, __q->name);	\
 	while (!list_empty(&__q->list)) {			\
+		__q->len--;					\
 		qcmd = list_first_entry(&__q->list,		\
 			struct msm_queue_cmd, member);		\
 		list_del_init(&qcmd->member);			\
@@ -447,9 +448,15 @@ static int __msm_get_frame(struct msm_sync *sync,
 		return -EAGAIN;
 	}
 
+	if ((!qcmd->command) && (qcmd->error_code & MSM_CAMERA_ERR_MASK)) {
+		frame->error_code = qcmd->error_code;
+		CDBG("%s: fake frame with camera error code = %d\n", __func__,
+			frame->error_code);
+		goto err;
+	}
+
 	vdata = (struct msm_vfe_resp *)(qcmd->command);
 	pphy = &vdata->phy;
-
 
 	rc = msm_pmem_frame_ptov_lookup(sync,
 			pphy->y_phy,
@@ -587,11 +594,13 @@ static struct msm_queue_cmd *__msm_control(struct msm_sync *sync,
 			queue->wait,
 			!list_empty_careful(&queue->list),
 			timeout);
-	CDBG("Waiting over for config status \n");
+	CDBG("Waiting over for config status\n");
 	if (list_empty_careful(&queue->list)) {
-		if (!rc)
+		if (!rc) {
 			rc = -ETIMEDOUT;
-		if (rc < 0) {
+			pr_err("%s: wait_event error %d\n", __func__, rc);
+			return ERR_PTR(rc);
+		} else if (rc < 0) {
 			pr_err("%s: wait_event error %d\n", __func__, rc);
 			return ERR_PTR(rc);
 		}
@@ -629,7 +638,7 @@ static struct msm_queue_cmd *__msm_control_nb(struct msm_sync *sync,
 	udata->value = udata + 1;
 	memcpy(udata->value, udata_to_copy->value, udata_to_copy->length);
 
-	qcmd->on_heap = 1;
+	atomic_set(&qcmd->on_heap, 1);
 
 	/* qcmd_resp will be set to NULL */
 	return __msm_control(sync, NULL, qcmd, 0);
@@ -659,7 +668,7 @@ static int msm_control(struct msm_control_device *ctrl_pmsm,
 	udata.value = data;
 	if (udata.type == CAMERA_STOP_SNAPSHOT)
 		sync->get_pic_abort = 1;
-	qcmd.on_heap = 0;
+        atomic_set(&qcmd.on_heap, 0);
 	qcmd.type = MSM_CAM_Q_CTRL;
 	qcmd.command = &udata;
 
@@ -686,7 +695,7 @@ static int msm_control(struct msm_control_device *ctrl_pmsm,
 
 	qcmd_resp = __msm_control(sync,
 				  &ctrl_pmsm->ctrl_q,
-				  &qcmd, MAX_SCHEDULE_TIMEOUT);
+				  &qcmd, msecs_to_jiffies(10000));
 
 	if (!qcmd_resp || IS_ERR(qcmd_resp)) {
 		/* Do not free qcmd_resp here.  If the config thread read it,
@@ -1016,7 +1025,7 @@ static int msm_ctrl_cmd_done(struct msm_control_device *ctrl_pmsm,
 		return -EFAULT;
 	}
 
-	qcmd->on_heap = 0;
+        atomic_set(&qcmd->on_heap, 0);
 	qcmd->command = command;
 	uptr = command->value;
 
@@ -1661,6 +1670,28 @@ static int msm_set_crop(struct msm_sync *sync, void __user *arg)
 	return 0;
 }
 
+static int msm_error_config(struct msm_sync *sync, void __user *arg)
+{
+	struct msm_queue_cmd *qcmd =
+		kmalloc(sizeof(struct msm_queue_cmd), GFP_KERNEL);
+
+	qcmd->command = NULL;
+
+	if (qcmd)
+		atomic_set(&(qcmd->on_heap), 1);
+
+	if (copy_from_user(&(qcmd->error_code), arg, sizeof(uint32_t))) {
+		ERR_COPY_FROM_USER();
+		return -EFAULT;
+	}
+
+	CDBG("%s: Enqueue Fake Frame with error code = %d\n", __func__,
+		qcmd->error_code);
+	msm_enqueue(&sync->frame_q, &qcmd->list_frame);
+
+	return 0;
+}
+
 static int msm_pp_grab(struct msm_sync *sync, void __user *arg)
 {
 	uint32_t enable;
@@ -1840,6 +1871,10 @@ static long msm_ioctl_config(struct file *filep, unsigned int cmd,
 					sdata->flash_data, led_state);
 		break;
 	}
+
+	case MSM_CAM_IOCTL_ERROR_CONFIG:
+		rc = msm_error_config(pmsm->sync, argp);
+		break;
 
 	default:
 		rc = msm_ioctl_common(pmsm, cmd, argp);
@@ -2065,7 +2100,7 @@ static void *msm_vfe_sync_alloc(int size,
 	struct msm_queue_cmd *qcmd =
 		kmalloc(sizeof(struct msm_queue_cmd) + size, gfp);
 	if (qcmd) {
-		qcmd->on_heap = 1;
+		atomic_set(&qcmd->on_heap, 1);
 		return qcmd + 1;
 	}
 	return NULL;
@@ -2077,7 +2112,7 @@ static void msm_vfe_sync_free(void *ptr)
 		struct msm_queue_cmd *qcmd =
 			(struct msm_queue_cmd *)ptr;
 		qcmd--;
-		if (qcmd->on_heap)
+		if (atomic_read(&qcmd->on_heap))
 			kfree(qcmd);
 	}
 }
@@ -2126,15 +2161,15 @@ static void msm_vfe_sync(struct msm_vfe_resp *vdata,
 			}
 		CDBG("%s: msm_enqueue frame_q\n", __func__);
 		msm_enqueue(&sync->frame_q, &qcmd->list_frame);
-		if (qcmd->on_heap)
-			qcmd->on_heap++;
+			if (atomic_read(&qcmd->on_heap))
+				atomic_add(1, &qcmd->on_heap);
 		break;
 
 		case VFE_MSG_OUTPUT_V:
 		CDBG("%s: msm_enqueue video frame_q\n", __func__);
 		msm_enqueue(&sync->frame_q, &qcmd->list_frame);
-		if (qcmd->on_heap)
-			qcmd->on_heap++;
+		if (atomic_read(&qcmd->on_heap))
+			atomic_add(1, &qcmd->on_heap);
 		break;
 
 		case VFE_MSG_SNAPSHOT:
@@ -2152,8 +2187,8 @@ static void msm_vfe_sync(struct msm_vfe_resp *vdata,
 			}
 
 		msm_enqueue(&sync->pict_q, &qcmd->list_pict);
-		if (qcmd->on_heap)
-			qcmd->on_heap++;
+		if (atomic_read(&qcmd->on_heap))
+			atomic_add(1, &qcmd->on_heap);
 		break;
 
 		case VFE_MSG_STATS_AWB:
@@ -2353,7 +2388,7 @@ static int __msm_v4l2_control(struct msm_sync *sync,
 	}
 	qcmd->type = MSM_CAM_Q_V4L2_REQ;
 	qcmd->command = out;
-	qcmd->on_heap = 1;
+	atomic_set(&qcmd->on_heap, 1);
 
 	if (out->type == V4L2_CAMERA_EXIT) {
 		rcmd = __msm_control(sync, NULL, qcmd, out->timeout_ms);
