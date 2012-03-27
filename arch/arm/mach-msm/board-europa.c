@@ -63,6 +63,10 @@
 #include "socinfo.h"
 #include "clock.h"
 #include "msm-keypad-devices.h"
+#ifdef CONFIG_SAMSUNG_JACK
+#include <linux/sec_jack.h>
+#include "proc_comm.h"
+#endif
 #ifdef CONFIG_USB_ANDROID
 #include <linux/usb/android.h>
 #endif
@@ -1732,6 +1736,9 @@ static struct platform_device *devices[] __initdata = {
 	&hs_device,
 	&msm_batt_device,
 	&msm_vibrator_device,
+#ifdef CONFIG_SAMSUNG_JACK
+	&sec_device_jack,
+#endif
 };
 
 static struct msm_panel_common_pdata mdp_pdata = {
@@ -2486,6 +2493,9 @@ static void __init msm7x2x_init(void)
 #endif
 #endif
 
+#ifdef CONFIG_SAMSUNG_JACK
+	sec_jack_gpio_init();
+#endif
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 
 #if defined(CONFIG_MSM_ARM9_USES_UART3)

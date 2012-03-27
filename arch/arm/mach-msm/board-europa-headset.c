@@ -1327,12 +1327,14 @@ static int h2w_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err_register_input_dev;
 
+#ifndef CONFIG_MACH_EUROPA
 #ifdef FEATURE_SND_RPC 
 	if(flag_boot)
 	{
 		mic_bias_on();
 		flag_boot = 0;
 	}
+#endif
 #endif
 
 	return 0;
