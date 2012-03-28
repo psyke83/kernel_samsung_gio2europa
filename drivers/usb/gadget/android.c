@@ -405,7 +405,7 @@ static int  android_bind(struct usb_composite_dev *cdev)
 	 */
 #if defined(CONFIG_USB_ANDROID_CDC_ECM) || defined(CONFIG_USB_ANDROID_RNDIS)
 		/* set up network link layer */
-		ret = gether_setup(cdev->gadget, hostaddr);
+		ret = gether_setup_name(cdev->gadget, hostaddr, "rndis");
 		if (ret && (ret != -EBUSY)) {
 			gserial_cleanup();
 			return ret;
