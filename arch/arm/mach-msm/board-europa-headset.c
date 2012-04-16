@@ -305,9 +305,13 @@ static void button_pressed(void)
 		return;
 	}
 
+#ifndef CONFIG_MACH_EUROPA
 	H2W_DBG("@@@@ press adc = [%d] \n", checking_adc);
 	if ( checking_adc >= 7  && checking_adc < 10 )
 	{
+#else
+	H2W_DBG("");
+#endif
 		atomic_set(&hi->btn_state, 1);
 		input_report_key(hi->input, KEY_MEDIA, 1);
 		input_sync(hi->input);
@@ -315,11 +319,16 @@ static void button_pressed(void)
 		earbutton_pressed = 1;
 		// for DFMS test
 		queue_work(g_earbutton_work_queue, &g_earbutton_work);
+#ifndef CONFIG_MACH_EUROPA
 	}
+#endif
 }
 
 static void button_released(void)
 {
+#ifdef CONFIG_MACH_EUROPA
+	H2W_DBG("");
+#endif
 	atomic_set(&hi->btn_state, 0);
 	input_report_key(hi->input, KEY_MEDIA, 0);
 	input_sync(hi->input);
@@ -603,7 +612,11 @@ static int mic_bias_on_forcely(void)
 static void insert_headset(void)
 {
 	unsigned long irq_flags;
+#ifndef CONFIG_MACH_EUROPA
 	int state;
+#else
+	int state = 0;
+#endif
 
 	int res;
 	int data1;
@@ -615,6 +628,7 @@ static void insert_headset(void)
 #endif
 
 	wake_lock_timeout(&headset_delayed_work_wake_lock, 5*HZ);
+#ifndef CONFIG_MACH_EUROPA
 	if(!on_call)
 	{
 		if(suspend_count)
@@ -626,6 +640,7 @@ static void insert_headset(void)
 			mic_bias_on_forcely();
 		}
 	}
+#endif
 #if 0
 	/* set 4 pole headset */	
 	state = BIT_HEADSET;
@@ -648,7 +663,9 @@ static void insert_headset(void)
 		printk(KERN_ERR "[H2W] %s :%d fail %d\n", __func__, data1, res);
 	}
 #endif
+#ifndef CONFIG_MACH_EUROPA
 	state &= ~(BIT_HEADSET_NO_MIC | BIT_HEADSET);
+#endif
 
 	//if (hi->headset_mic_35mm) {
 	/* support 3.5mm earphone with mic */
@@ -1069,10 +1086,12 @@ static irqreturn_t button_irq_handler(int irq, void *dev_id)
 	int retry_limit = 10;
 	int headset_state; 
 
+#ifndef CONFIG_MACH_EUROPA
 	adc = get_3pi_adc();
 	H2W_DBG("#### irq  adc = [%d] ", adc);
-
-//	H2W_DBG("");
+#else
+	H2W_DBG("");
+#endif
 	do {
 #ifdef FEATURE_SENDEND_ENABLE
 		value1 = gpio_get_value(GPIO_SEND_END );
@@ -1112,6 +1131,7 @@ static irqreturn_t button_irq_handler(int irq, void *dev_id)
 	if(value1 == value2 && retry_limit > 0)
 	{
 		hi->button_state = value1;
+#ifndef CONFIG_MACH_EUROPA
 		if(value1 == 1)
 		{
 			checking_adc = adc;
@@ -1121,6 +1141,7 @@ static irqreturn_t button_irq_handler(int irq, void *dev_id)
 		{
 			H2W_DBG(" FAIL !\n");
 		}
+#endif
 		H2W_DBG("GPIO_SEND_END is %s (%d retries)", hi->button_state?"HIGH":"LOW", (10 - retry_limit));
 		//hrtimer_start(&hi->btn_timer, hi->btn_debounce_time, HRTIMER_MODE_REL);
 		schedule_work(&g_earbutton_func_work);
