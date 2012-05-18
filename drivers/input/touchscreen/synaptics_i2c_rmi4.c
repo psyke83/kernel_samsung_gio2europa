@@ -1,7 +1,9 @@
 #if defined(CONFIG_MACH_COOPER)
 #include "synaptics_i2c_rmi4_cooper.c"
-#elif defined(CONFIG_MACH_EUROPA)
+#elif defined(CONFIG_MACH_EUROPA) && !defined(CONFIG_TOUCHSCREEN_SYNAPTICS_I2C_RMI4_DT)
 #include "synaptics_i2c_rmi4_europa.c"
+#elif defined(CONFIG_MACH_EUROPA) && defined(CONFIG_TOUCHSCREEN_SYNAPTICS_I2C_RMI4_DT)
+#include "synaptics_i2c_rmi4_europa-dt.c"
 #elif defined(CONFIG_MACH_BENI)
 #include "synaptics_i2c_rmi4_beni.c"
 #elif defined(CONFIG_MACH_TASS)

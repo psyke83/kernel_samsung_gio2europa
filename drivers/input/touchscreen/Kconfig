@@ -602,6 +602,13 @@ config TOUCHSCREEN_SYNAPTICS_I2C_RMI4
 	help
 	  This enables support for Synaptics RMI4 over I2C based touchscreens.
 
+config TOUCHSCREEN_SYNAPTICS_I2C_RMI4_DT
+	bool "Fake dual-touch support for Synaptics i2c touchscreen"
+	depends on TOUCHSCREEN_SYNAPTICS_I2C_RMI4
+	help
+	  This enables fake dual-touch support for Synaptics RMI4 over I2C
+	  based touchscreens.
+
 config TOUCHSCREEN_MXT140_I2C_TSP
 	tristate "Atmel mXT140 i2c touchscreen"
 	depends on I2C
