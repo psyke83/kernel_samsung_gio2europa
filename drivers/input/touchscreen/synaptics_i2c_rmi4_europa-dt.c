@@ -338,9 +338,9 @@ static void synaptics_ts_work_func(struct work_struct *work)
 		}
 	}}
 	
-	printk("dt_ativar = %d, gm_ativar = %d\n",dt_ativar,gm_ativar);
+	/*printk("dt_ativar = %d, gm_ativar = %d\n",dt_ativar,gm_ativar);
 	printk("dualtouchs=%d\n",dtouchs);
-	/*printk("[TSP] coordenadas: x=%d,y=%d,finger=%d\n",x,y,finger);*/
+	printk("[TSP] coordenadas: x=%d,y=%d,finger=%d\n",x,y,finger);*/
 	if (send_msg==1) {
 	if (dtouchs<2) {
 	  input_report_abs(ts->input_dev, ABS_X, x);
